@@ -143,7 +143,14 @@ def connect():
 
 
 def _exec(cur, sql: str, ph: str, params=()):
-    return cur.execute(sql.replace("?", ph), params)
+    """执行并返回 cursor。
+
+    注意：sqlite3 的 execute() 返回 cursor，psycopg2 的 execute() 返回 None，
+    因此不能直接 `return cur.execute(...)`，否则 PG 下后续 fetchone() 会得到
+    AttributeError。显式返回 cur 让两种驱动行为一致。
+    """
+    cur.execute(sql.replace("?", ph), params)
+    return cur
 
 
 def init_db() -> None:
@@ -159,13 +166,14 @@ def now() -> str:
 def create_user(username, email, password_hash, salt, role="user"):
     with connect() as (conn, ph):
         cur = conn.cursor()
-        _exec(cur,
-              "INSERT INTO users(username,email,password_hash,salt,role,created_at) "
-              "VALUES(?,?,?,?,?,?)", ph,
-              (username, email, password_hash, salt, role, now()))
+        sql = ("INSERT INTO users(username,email,password_hash,salt,role,created_at) "
+               "VALUES(?,?,?,?,?,?)")
+        params = (username, email, password_hash, salt, role, now())
         if IS_PG:
-            cur.execute("SELECT LASTVAL()")
+            # 用 RETURNING 取 ID，避免 LASTVAL() 在连接池/并发会话下取值不稳。
+            cur = _exec(cur, sql + " RETURNING id", ph, params)
             return int(cur.fetchone()[0])
+        cur = _exec(cur, sql, ph, params)
         return int(cur.lastrowid)
 
 
