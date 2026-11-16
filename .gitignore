@@ -1,0 +1,36 @@
+# 虚拟环境与依赖缓存
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# 业务数据、备份与日志（由应用自己管理，不入库）
+data/
+backups/
+logs/
+tmp/
+
+# 离线 wheels 目录（体积大，按需生成）
+vendor/
+
+# 编辑器 / OS 临时文件
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+
+# 本地临时验证产物（非项目交付）
+perf_probe.py
+compare_scores.py
+utils_before_perf.py
+deploy_verify.ps1
+rename_widget_arg.py
+unittest_out.txt
+交付执行计划.md
+
+# 密钥与云数据库凭据（严禁入库）
+.streamlit/secrets.toml
+demo_users.json
+*.db

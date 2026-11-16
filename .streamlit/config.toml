@@ -1,0 +1,23 @@
+[server]
+headless = true
+port = 8501
+# 仅本机访问；需要局域网使用时改为 "0.0.0.0" 并配置防火墙白名单。
+address = "localhost"
+maxUploadSize = 5
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# 生产不向浏览器暴露异常堆栈；完整堆栈写入 logs/app.log。
+# 开发调试时可临时改为 true。
+showErrorDetails = false
+
+[theme]
+primaryColor = "#1e5b98"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f7fafd"
+textColor = "#1a2b42"
+font = "sans serif"
