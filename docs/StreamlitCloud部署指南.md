@@ -58,14 +58,18 @@ GitHub 已禁止用密码推送。需生成 Personal Access Token（PAT）：
 
 ## 2. 拿到 Supabase 数据库连接串
 
-1. 进入 Supabase 项目 → 左侧 `Project Settings`（齿轮）→ `Database`。
-2. 找到 **Connection string** 区块，切到 **`Session pooler`** 标签（端口 6543，适合无公网 IP 的部署）。
+1. Supabase 项目右上角点 **`Connect`**（或 `Project Settings` → `Database` → Connection string）。
+2. 顶部选 **`Direct` / `Connection string`** → Connection Method 选 **`Session pooler`**
+   → Type 选 **`URI`**（就是你截图那一页）。
 3. 复制连接串，形如：
    ```
-   postgresql://postgres.<项目ref>:<数据库密码>@<地区>.pooler.supabase.com:6543/postgres
+   postgresql://postgres.<项目ref>:[YOUR-PASSWORD]@<地区>.pooler.supabase.com:5432/postgres
    ```
-   - `<数据库密码>` 是你**建项目时设的数据库密码**（不是账号密码）。
-   - 若忘记，Supabase → Project Settings → Database → 可重置数据库密码。
+   - **Session pooler 端口是 5432**（6543 是 Transaction pooler，不要混用）。
+   - 把 `[YOUR-PASSWORD]` 替换成你**建项目时设的数据库密码**（不是账号密码）。
+   - 忘记密码：点连接串旁边的 **`Reset database password`** 重置（截图里那个铅笔按钮）。
+4. ⚠️ **密码含特殊字符必须 URL 编码**：`@ : / # ? %` 等要转成 `%40 %3A %2F %23 %3F %25`，
+   否则连接会失败。最省事的做法：重置数据库密码时**只用字母和数字**，就不会有编码问题。
 
 ---
 
@@ -79,7 +83,7 @@ GitHub 已禁止用密码推送。需生成 Personal Access Token（PAT）：
 3. 点 **`Advanced settings`** → **`Secrets`**，粘贴以下内容（把连接串换成你第 2 步拿到的）：
    ```toml
    EFA_USE_DB = "1"
-   DATABASE_URL = "postgresql://postgres.<项目ref>:<数据库密码>@<地区>.pooler.supabase.com:6543/postgres"
+   DATABASE_URL = "postgresql://postgres.<项目ref>:<数据库密码>@<地区>.pooler.supabase.com:5432/postgres"
    ```
    > ⚠️ 这是你唯一需要填密钥的地方。填完保存。
 4. 点 `Deploy`。等待 1–3 分钟构建（首次会装依赖，较慢）。
@@ -113,6 +117,10 @@ Streamlit Cloud 检测到 push 会**自动重新部署**。Secrets 不用重填�
 
 - **首个用户注册就报错 / 白屏**：已修复——数据库连接时会自动幂等建表，云端无需手工初始化。
   若仍报错，看 Logs 确认 DATABASE_URL 是否指向可写的 Supabase 项目。
+- **报 `psycopg2.errors.UniqueViolation`**（旧版会出现）：原因是并发会话同时执行
+  `CREATE TABLE IF NOT EXISTS`，PostgreSQL 系统目录撞唯一索引。已改为「进程内只建一次 +
+  `pg_advisory_xact_lock` 串行化 + 冲突兜底」，并支持残留半张表时自动补齐。
+  看到此报错说明云端仍是旧代码，重新 push 并 `Reboot`。
 - **打开显示 host/CORS 相关错误**：`.streamlit/config.toml` 已移除写死的 `localhost` 绑定并收紧 CORS；
   如平台仍报 host 不允许，在该文件 `[server]` 段加 `allowedHosts = ["你的 app 域名"]`。
 - **页面提示"数据保存在 data 文件夹"**：那是旧版本文案；现版本在 DB 模式下会显示
