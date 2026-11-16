@@ -88,7 +88,7 @@ with c3:
                   else (dmin, dmax))
 with c4:
     include_fms = st.checkbox("纳入 FMS 筛查结果", value=True)
-    st.caption("FMS 的 0~3 原始分不进入 0~100 得分体系，仅用于风险、疼痛与左右不对称的原因分析。")
+    st.caption("FMS 的 0～3 原始分不进入 0～100 得分体系，仅用于风险、疼痛与左右不对称的原因分析。")
 
 if start and end and start > end:
     st.error("开始日期不能晚于结束日期，请重新选择统计区间。")
@@ -173,7 +173,7 @@ with st.expander("按能力域汇总（图表与表格）", expanded=False):
     else:
         fig = px.bar(cat, x="类别", y="平均得分", range_y=[0, 100],
                      labels={"平均得分": "平均得分", "类别": "能力域"},
-                     title="各能力域平均得分（0~100，虚线为 60 分达标线）")
+                     title="各能力域平均得分（0～100，虚线为 60 分达标线）")
         fig.add_hline(y=PASS_LINE, line_dash="dash", line_color="#e08b2c")
         st.plotly_chart(plotly_font(fig), width="stretch")
         cat_shown = cat.copy()

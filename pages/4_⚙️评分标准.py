@@ -119,7 +119,7 @@ with tab_custom:
         with n3:
             category = st.text_input("类别", value="自定义")
         kind = st.selectbox("评分类型", ["continuous", "descriptive"],
-                            format_func=lambda x: "continuous（0~100 分）" if x == "continuous"
+                            format_func=lambda x: "continuous（0～100 分）" if x == "continuous"
                             else "descriptive（仅记录不评分）")
         v1, v2 = st.columns(2)
         with v1:

@@ -15,10 +15,10 @@ from utils import (
 st.set_page_config(page_title="数据分析", page_icon="📊", layout="wide")
 inject_css()
 ensure_files()
-page_header("数据分析", "体能分析看 0~100 分进步曲线，FMS 分析看 0~21 分功能风险", "📊")
+page_header("数据分析", "体能分析看 0～100 分进步曲线，FMS 分析看 0～21 分功能风险", "📊")
 render_sidebar()
-st.caption(f"评分标准：{STANDARDS_DISCLAIMER}。FMS 的 0~3 原始分绝不进入平均体能得分、"
-           "达标率或 0~100 坐标轴。")
+st.caption(f"评分标准：{STANDARDS_DISCLAIMER}。FMS 的 0～3 原始分绝不进入平均体能得分、"
+           "达标率或 0～100 坐标轴。")
 
 tests = load_tests()
 names = athlete_map()
@@ -88,7 +88,7 @@ with tab_physical:
             st.plotly_chart(plotly_font(fig2), width="stretch")
 
         with right:
-            st.subheader("能力雷达图（0~100）")
+            st.subheader("能力雷达图（0～100）")
             radar_person = st.selectbox("选择运动员", options=sorted(data["姓名"].unique()))
             items = sorted(data["测试项目"].unique())
             one = data[data["姓名"] == radar_person].groupby("测试项目")["得分"].mean()
@@ -145,7 +145,7 @@ with tab_fms:
 
         fl, fr = st.columns([1.35, 1])
         with fl:
-            st.subheader("FMS 总分分布（0~21，风险线 14）")
+            st.subheader("FMS 总分分布（0～21，风险线 14）")
             fig = px.bar(view, x="姓名", y="FMS总分", color="风险", barmode="group",
                          range_y=[0, 21],
                          color_discrete_map={"一般": "#1e5b98", "较高风险": "#d9534f"},
@@ -155,7 +155,7 @@ with tab_fms:
             st.plotly_chart(plotly_font(fig), width="stretch")
 
         with fr:
-            st.subheader("各动作平均原始分（0~3）")
+            st.subheader("各动作平均原始分（0～3）")
             fms_rows = tests[tests["测试类别"] == "FMS"]
             detail = []
             for _, g in fms_rows.groupby(["运动员ID", "测试日期"], dropna=False):
@@ -168,7 +168,7 @@ with tab_fms:
                 mov = (pd.DataFrame(detail).groupby("动作", as_index=False)["原始分"].mean()
                        .sort_values("原始分"))
                 fig2 = px.bar(mov, x="原始分", y="动作", orientation="h", range_x=[0, 3],
-                              labels={"原始分": "平均原始分（0~3）"},
+                              labels={"原始分": "平均原始分（0～3）"},
                               color_discrete_sequence=["#18a58b"])
                 st.plotly_chart(plotly_font(fig2), width="stretch")
             else:
