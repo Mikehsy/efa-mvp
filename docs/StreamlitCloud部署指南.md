@@ -111,6 +111,12 @@ Streamlit Cloud 检测到 push 会**自动重新部署**。Secrets 不用重填�
 
 ## 6. 常见问题
 
+- **首个用户注册就报错 / 白屏**：已修复——数据库连接时会自动幂等建表，云端无需手工初始化。
+  若仍报错，看 Logs 确认 DATABASE_URL 是否指向可写的 Supabase 项目。
+- **打开显示 host/CORS 相关错误**：`.streamlit/config.toml` 已移除写死的 `localhost` 绑定并收紧 CORS；
+  如平台仍报 host 不允许，在该文件 `[server]` 段加 `allowedHosts = ["你的 app 域名"]`。
+- **页面提示"数据保存在 data 文件夹"**：那是旧版本文案；现版本在 DB 模式下会显示
+  "数据按账号独立保存在云端数据库"。若看到旧文案，说明云端拉的是旧代码，重新 push 并 Reboot。
 - **部署失败 `ModuleNotFoundError: psycopg2`**：确认 `requirements.txt` 已含 `psycopg2-binary>=2.9,<3` 并已 push。
 - **连不上数据库**：检查 Secrets 里 DATABASE_URL 是否正确、用的是 Session pooler 连接串、数据库密码没填错。
 - **打开是登录页但注册后报错**：看 Streamlit Cloud 的 Logs（右上角 `⋯` → `Manage app` → `Logs`），把报错发我。

@@ -10,9 +10,9 @@ import streamlit as st
 
 from utils import (
     FMS_PAIN_WARNING, FMS_RISK_LINE, STANDARDS_DISCLAIMER, athlete_map,
-    build_report, clear_all_data, csv_download, empty_state, ensure_files,
-    fms_sessions, inject_css, load_athletes, load_tests, page_header,
-    physical_scores, plotly_font, render_sidebar, with_names,
+    build_report, clear_all_data, csv_download, db_mode_enabled, empty_state,
+    ensure_files, fms_sessions, inject_css, load_athletes, load_tests,
+    page_header, physical_scores, plotly_font, render_sidebar, with_names,
 )
 
 st.set_page_config(page_title="总览 | 体能与功能评估系统", page_icon="🏅", layout="wide")
@@ -163,9 +163,13 @@ else:
 
 # ------------------------------------------------------------------ 数据管理
 with st.expander("数据管理（演示数据 / 清空 / 备份）"):
-    st.write("所有内容都保存在项目 `data` 文件夹的 3 个 CSV 文件里："
-             "`athletes.csv`（运动员）、`tests.csv`（测试与评估）、`standards.csv`（评分标准）。"
-             "复制这个文件夹就等于完整备份。")
+    if db_mode_enabled():
+        st.write("数据按账号独立保存在云端数据库，换设备登录后自动同步。"
+                 "可通过页面上的「导出 CSV」自行留存副本。")
+    else:
+        st.write("所有内容都保存在项目 `data` 文件夹的 3 个 CSV 文件里："
+                 "`athletes.csv`（运动员）、`tests.csv`（测试与评估）、`standards.csv`（评分标准）。"
+                 "复制这个文件夹就等于完整备份。")
     b1, b2 = st.columns(2)
     with b1:
         st.caption("载入演示数据会重做运动员与测试与评估记录（保留原 192 条旧记录结构，"
@@ -176,7 +180,7 @@ with st.expander("数据管理（演示数据 / 清空 / 备份）"):
             st.success("已载入演示数据")
             st.rerun()
     with b2:
-        st.caption("清空后不可恢复，请先备份 data 文件夹（评分标准配置会保留）。")
+        st.caption("清空后不可恢复，请先导出数据留存（评分标准配置会保留）。")
         confirm = st.checkbox("我确认要清空全部数据")
         if st.button("清空全部数据", disabled=not confirm, width="stretch"):
             clear_all_data()

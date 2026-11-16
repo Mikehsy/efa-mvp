@@ -38,32 +38,6 @@ USE_DB = _secret("EFA_USE_DB", "0").strip().lower() in {"1", "true", "yes", "on"
 IS_PG = DATABASE_URL.lower().startswith(("postgres://", "postgresql://"))
 
 
-@contextmanager
-def connect():
-    """返回 (conn, ph)；ph 是该驱动的占位符（ psycopg2=%s, sqlite=? ）。"""
-    if IS_PG:
-        import psycopg2
-        conn = psycopg2.connect(DATABASE_URL)
-        ph = "%s"
-    else:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
-        ph = "?"
-    try:
-        yield conn, ph
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def _exec(cur, sql: str, ph: str, params=()):
-    return cur.execute(sql.replace("?", ph), params)
-
-
 DDL_USERS = """
 CREATE TABLE IF NOT EXISTS users (
     id          {ID} PRIMARY KEY {AUTO},
@@ -86,6 +60,39 @@ CREATE TABLE IF NOT EXISTS user_data (
     PRIMARY KEY (owner_id, kind)
 )
 """
+
+
+@contextmanager
+def connect():
+    """返回 (conn, ph)；ph 是该驱动的占位符（ psycopg2=%s, sqlite=? ）。"""
+    if IS_PG:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        ph = "%s"
+    else:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        ph = "?"
+    try:
+        # 幂等建表：保证任何入口（含首次注册）都能安全使用，云端无需手工初始化。
+        cur = conn.cursor()
+        if IS_PG:
+            cur.execute(DDL_USERS.format(ID="BIGSERIAL", AUTO=""))
+        else:
+            cur.execute(DDL_USERS.format(ID="INTEGER", AUTO="AUTOINCREMENT"))
+        cur.execute(DDL_DATA)
+        yield conn, ph
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _exec(cur, sql: str, ph: str, params=()):
+    return cur.execute(sql.replace("?", ph), params)
 
 
 def init_db() -> None:

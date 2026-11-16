@@ -1,10 +1,9 @@
 [server]
 headless = true
 port = 8501
-# 仅本机访问；需要局域网使用时改为 "0.0.0.0" 并配置防火墙白名单。
-address = "localhost"
+# 不写死 address：本机由启动脚本用 --server.address 指定，云端由平台接管。
 maxUploadSize = 5
-enableCORS = false
+enableCORS = true
 enableXsrfProtection = true
 
 [browser]
