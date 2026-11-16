@@ -181,7 +181,7 @@ DESCRIPTIVE_ITEMS = {
     "腰臀比": {"unit": "", "category": "身体形态"},
 }
 
-# FMS 完整版：7 动作（0~3 分）、5 个双侧动作、3 项排除性测试。
+# FMS 完整版：7 动作（0～3 分）、5 个双侧动作、3 项排除性测试。
 # (名称, 是否双侧, 关联的排除性测试)
 FMS_MOVEMENTS = [
     ("FMS深蹲", False, ""),
@@ -420,6 +420,14 @@ def ensure_files() -> None:
     """
     uid = _db_user_id()
     if uid is not None:
+        # 每个会话/每个用户只初始化一次，避免每次读表都多一次跨网络查询。
+        flag = "_efa_db_ready"
+        try:
+            ready = st.session_state.get(flag)
+        except Exception:
+            ready = None
+        if ready == uid:
+            return
         import db
         db.init_db()
         if not db.has_data(uid):
@@ -428,6 +436,12 @@ def ensure_files() -> None:
             std = generate_default_standards()
             db.save_frame(uid, "standards",
                           std[STANDARD_COLS].to_dict(orient="records"), STANDARD_COLS)
+        for k in ("athlete", "test", "standards"):
+            _invalidate_frame(uid, k)
+        try:
+            st.session_state[flag] = uid
+        except Exception:
+            pass
         return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     for path, cols in ((ATHLETE_FILE, ATHLETE_COLS), (TEST_FILE, TEST_COLS)):
@@ -596,7 +610,7 @@ def validate_date(value, *, allow_future_days: int = 1) -> str:
 
 
 def validate_score(value, kind: str) -> float | None:
-    """校验成绩：数值有限；ordinal 必须在 0~3；binary 不做数值校验。"""
+    """校验成绩：数值有限；ordinal 必须在 0～3；binary 不做数值校验。"""
     if _clean(kind) == "binary":
         return None
     num = pd.to_numeric(value, errors="coerce")
@@ -606,7 +620,7 @@ def validate_score(value, kind: str) -> float | None:
     if not math.isfinite(num):
         raise ValidationError("成绩不能是无穷大或非数值。")
     if _clean(kind) == "ordinal" and not 0 <= num <= 3:
-        raise ValidationError("FMS 动作得分必须在 0~3 之间。")
+        raise ValidationError("FMS 动作得分必须在 0～3 之间。")
     return num
 
 
@@ -830,6 +844,29 @@ def restore_backup(folder) -> int:
     return len(DATA_FILES)
 
 
+# DB 模式读表缓存：一次页面渲染里同一张表常被读多次（侧栏、首页、卡片），
+# 每次都跨洋查库会让每次交互都变慢。按 (用户ID, 表类型) 缓存，短 TTL 兜底，
+# 写入时立即失效，避免看到旧数据或跨用户串数据。
+_FRAME_CACHE = {}
+_FRAME_CACHE_TTL = 5.0
+
+
+def _load_frame(uid, kind: str):
+    import db
+    key = (str(uid), kind)
+    now = time.monotonic()
+    hit = _FRAME_CACHE.get(key)
+    if hit and now - hit[0] < _FRAME_CACHE_TTL:
+        return hit[1], hit[2]
+    records, saved_cols = db.load_frame(uid, kind)
+    _FRAME_CACHE[key] = (now, records, saved_cols)
+    return records, saved_cols
+
+
+def _invalidate_frame(uid, kind: str) -> None:
+    _FRAME_CACHE.pop((str(uid), kind), None)
+
+
 def load_table(path: Path, cols: list[str]) -> pd.DataFrame:
     """读取表格；缺列自动补空；损坏文件给出恢复指引并返回空表，不白屏。
 
@@ -838,8 +875,7 @@ def load_table(path: Path, cols: list[str]) -> pd.DataFrame:
     ensure_files()
     uid = _db_user_id()
     if uid is not None:
-        import db
-        records, saved_cols = db.load_frame(uid, _kind_from_path(path))
+        records, saved_cols = _load_frame(uid, _kind_from_path(path))
         if records is None:
             return pd.DataFrame(columns=cols).fillna("")
         df = pd.DataFrame(records)
@@ -875,8 +911,9 @@ def save_table(df: pd.DataFrame, path: Path, cols: list[str]) -> None:
     uid = _db_user_id()
     if uid is not None:
         import db
-        db.save_frame(uid, _kind_from_path(path),
-                      out.to_dict(orient="records"), list(cols))
+        kind = _kind_from_path(path)
+        db.save_frame(uid, kind, out.to_dict(orient="records"), list(cols))
+        _invalidate_frame(uid, kind)
         return
     atomic_write_csv(out, path)
 
@@ -1072,10 +1109,10 @@ def lookup_standard(std: pd.DataFrame, item: str, group: str) -> dict | None:
 
 
 def calc_score(item: str, value, group: str, std: pd.DataFrame | None = None) -> float | None:
-    """评分器按「评分类型」分派：仅 continuous 线性换算 0~100 分。
+    """评分器按「评分类型」分派：仅 continuous 线性换算 0～100 分。
 
-    ordinal（FMS 0~3）、binary（排除性测试）、descriptive（身高/体重/BMI）
-    均返回 None —— 绝不进入平均体能得分、达标率或 0~100 坐标轴。
+    ordinal（FMS 0～3）、binary（排除性测试）、descriptive（身高/体重/BMI）
+    均返回 None —— 绝不进入平均体能得分、达标率或 0～100 坐标轴。
     """
     if value is None or pd.isna(value):
         return None
@@ -1113,7 +1150,7 @@ def result_display(row) -> str:
 
 
 def physical_scores(df: pd.DataFrame) -> pd.DataFrame:
-    """只保留 continuous 且已评分的记录（FMS 永不被计入 0~100 体系）。"""
+    """只保留 continuous 且已评分的记录（FMS 永不被计入 0～100 体系）。"""
     if df.empty:
         return df
     return df[(df["评分类型"] == "continuous")
@@ -1243,7 +1280,7 @@ def load_tests() -> pd.DataFrame:
 
 
 def fms_sessions(tests: pd.DataFrame | None = None) -> pd.DataFrame:
-    """按 (运动员ID, 测试日期) 汇总一次 FMS 筛查：0~21 总分、风险、疼痛、左右不对称。"""
+    """按 (运动员ID, 测试日期) 汇总一次 FMS 筛查：0～21 总分、风险、疼痛、左右不对称。"""
     cols = ["运动员ID", "姓名", "测试日期", "FMS总分", "风险", "含疼痛", "疼痛警示",
             "结果说明", "不对称清单", "动作完整数", "各动作得分"]
     if tests is None:

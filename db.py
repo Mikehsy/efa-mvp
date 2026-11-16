@@ -75,10 +75,57 @@ _SCHEMA_READY = False
 _ADVISORY_KEY = 2026111601
 
 
+_POOL = None
+_POOL_LOCK = threading.Lock()
+
+
+class _PooledConn:
+    """把池化连接包装成普通连接：close() 归还池而不是真的断开。
+
+    这样 connect() 无需改动、上层与单元测试的 mock 也不受影响。
+    """
+
+    def __init__(self, pool, conn):
+        self._pool = pool
+        self._conn = conn
+        self._discard = False
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        try:
+            self._conn.rollback()
+        except Exception:
+            # 连接已被服务端断开（Supabase 空闲超时），标记丢弃以便重连。
+            self._discard = True
+
+    def close(self):
+        self._pool.putconn(self._conn, close=self._discard)
+
+
+def _get_pool():
+    global _POOL
+    if _POOL is None:
+        with _POOL_LOCK:
+            if _POOL is None:
+                from psycopg2.pool import ThreadedConnectionPool
+                _POOL = ThreadedConnectionPool(1, 4, DATABASE_URL)
+    return _POOL
+
+
 def _new_conn():
     if IS_PG:
-        import psycopg2
-        return psycopg2.connect(DATABASE_URL), "%s"
+        # 复用连接，避免每次查询都做一次跨洋 TCP + TLS 握手。
+        pool = _get_pool()
+        conn = pool.getconn()
+        if getattr(conn, "closed", 0):
+            pool.putconn(conn, close=True)   # 服务端已断开，换新连接
+            conn = pool.getconn()
+        return _PooledConn(pool, conn), "%s"
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row

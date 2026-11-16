@@ -29,7 +29,7 @@ if athletes.empty:
     empty_state("系统里还没有运动员资料。")
 
 st.caption(f"评分标准：{STANDARDS_DISCLAIMER}。达标率与平均体能得分只统计 continuous 评分项；"
-           "FMS 的 0~3 原始分不参与 0~100 分体系。")
+           "FMS 的 0～3 原始分不参与 0～100 分体系。")
 
 # ------------------------------------------------------------------ 4 个 KPI
 physical = physical_scores(tests)
@@ -79,7 +79,7 @@ else:
         st.plotly_chart(plotly_font(fig2), width="stretch")
 
 # ------------------------------------------------------------------ FMS 概览区
-st.subheader("FMS 概览区（0~21 分，风险线 14 分）")
+st.subheader("FMS 概览区（0～21 分，风险线 14 分）")
 sessions = fms_sessions(tests)
 if sessions.empty:
     st.info("暂无 FMS 功能筛查记录。到「测试与评估 → FMS 录入矩阵」录入一次完整筛查。")
@@ -108,7 +108,7 @@ else:
         chart = sessions.sort_values("测试日期").copy()
         chart["测试日期"] = pd.to_datetime(chart["测试日期"]).dt.strftime("%Y-%m-%d")
         fig3 = px.bar(chart, x="测试日期", y="FMS总分", color="姓名", barmode="group",
-                      range_y=[0, 21], labels={"FMS总分": "FMS 总分（0~21）"})
+                      range_y=[0, 21], labels={"FMS总分": "FMS 总分（0～21）"})
         fig3.add_hline(y=FMS_RISK_LINE, line_dash="dash", line_color="#d9534f",
                        annotation_text="风险线 14 分")
         st.plotly_chart(plotly_font(fig3), width="stretch")
