@@ -15,11 +15,13 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 from config import DATA_DIR
+
 
 def _secret(name: str, default: str = "") -> str:
     """云上从 Streamlit secrets 读取，本地回退环境变量。"""
@@ -36,32 +38,6 @@ DATABASE_URL = _secret("DATABASE_URL", "").strip()
 DB_PATH = Path(_secret("EFA_DB_PATH", str(DATA_DIR / "efa.db")))
 USE_DB = _secret("EFA_USE_DB", "0").strip().lower() in {"1", "true", "yes", "on"}
 IS_PG = DATABASE_URL.lower().startswith(("postgres://", "postgresql://"))
-
-
-@contextmanager
-def connect():
-    """返回 (conn, ph)；ph 是该驱动的占位符（ psycopg2=%s, sqlite=? ）。"""
-    if IS_PG:
-        import psycopg2
-        conn = psycopg2.connect(DATABASE_URL)
-        ph = "%s"
-    else:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
-        ph = "?"
-    try:
-        yield conn, ph
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def _exec(cur, sql: str, ph: str, params=()):
-    return cur.execute(sql.replace("?", ph), params)
 
 
 DDL_USERS = """
@@ -88,14 +64,91 @@ CREATE TABLE IF NOT EXISTS user_data (
 """
 
 
-def init_db() -> None:
-    with connect() as (conn, ph):
+# ------------------------------------------------------------------ 建表（并发安全）
+# PostgreSQL 的 CREATE TABLE IF NOT EXISTS 并非原子：多会话并发时可能同时
+# 插入系统目录并撞 pg_type 唯一索引（UniqueViolation）。因此：
+#   1) 进程内只建一次（双检锁），
+#   2) 用事务级 advisory lock 串行化跨进程并发，
+#   3) 万一仍撞唯一约束，视为"别人已建好"，重试读取而非报错。
+_SCHEMA_LOCK = threading.Lock()
+_SCHEMA_READY = False
+_ADVISORY_KEY = 2026111601
+
+
+def _new_conn():
+    if IS_PG:
+        import psycopg2
+        return psycopg2.connect(DATABASE_URL), "%s"
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    return conn, "?"
+
+
+def _ensure_schema() -> None:
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    with _SCHEMA_LOCK:
+        if _SCHEMA_READY:
+            return
+        conn, _ = _new_conn()
+        try:
+            cur = conn.cursor()
+            if IS_PG:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (_ADVISORY_KEY,))
+            cur.execute(DDL_USERS.format(
+                ID="BIGSERIAL" if IS_PG else "INTEGER",
+                AUTO="" if IS_PG else "AUTOINCREMENT"))
+            cur.execute(DDL_DATA)
+            conn.commit()
+            _SCHEMA_READY = True
+        except Exception as exc:
+            conn.rollback()
+            # 并发下另一个会话已建好表：确认表确实存在即可继续。
+            if _tables_exist(conn):
+                _SCHEMA_READY = True
+            else:
+                raise
+        finally:
+            conn.close()
+
+
+def _tables_exist(conn) -> bool:
+    try:
         cur = conn.cursor()
         if IS_PG:
-            cur.execute(DDL_USERS.format(ID="BIGSERIAL", AUTO=""))
-        else:
-            cur.execute(DDL_USERS.format(ID="INTEGER", AUTO="AUTOINCREMENT"))
-        cur.execute(DDL_DATA)
+            cur.execute("SELECT to_regclass('public.users'), to_regclass('public.user_data')")
+            row = cur.fetchone()
+            return bool(row and row[0] and row[1])
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('users','user_data')")
+        return len(cur.fetchall()) == 2
+    except Exception:
+        return False
+
+
+@contextmanager
+def connect():
+    """返回 (conn, ph)；ph 是该驱动的占位符（ psycopg2=%s, sqlite=? ）。"""
+    _ensure_schema()
+    conn, ph = _new_conn()
+    try:
+        yield conn, ph
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _exec(cur, sql: str, ph: str, params=()):
+    return cur.execute(sql.replace("?", ph), params)
+
+
+def init_db() -> None:
+    """显式初始化入口，保持向后兼容。"""
+    _ensure_schema()
 
 
 def now() -> str:

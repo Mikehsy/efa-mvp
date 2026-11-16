@@ -103,7 +103,7 @@ def active_user_id():
     return _ACTIVE_USER_ID
 
 
-def _db_mode_enabled() -> bool:
+def db_mode_enabled() -> bool:
     """DB 模式开关：优先 Streamlit secrets，回退环境变量。"""
     try:
         if hasattr(st, "secrets") and "EFA_USE_DB" in st.secrets:
@@ -116,7 +116,7 @@ def _db_mode_enabled() -> bool:
 
 def _db_user_id():
     """DB 模式下返回当前登录用户 id，否则 None。"""
-    if not _db_mode_enabled():
+    if not db_mode_enabled():
         return None
     u = st.session_state.get("efa_user") or {}
     return u.get("id")
@@ -1480,7 +1480,8 @@ def seed_demo_data() -> None:
 @with_data_lock
 def clear_all_data() -> None:
     """清空运动员与测试与评估记录；评分标准属于配置，予以保留。"""
-    create_backup("before_clear")
+    if not db_mode_enabled():
+        create_backup("before_clear")
     for kind in ("athlete", "test"):
         path, cols, _ = TABLES[kind]
         save_table(pd.DataFrame(columns=cols), path, cols)
@@ -1503,12 +1504,12 @@ def require_access_gate() -> None:
 
     if st.session_state.get("efa_user") or st.session_state.get("_efa_user"):
         # DB 模式下每次 rerun 确保当前用户数据已初始化。
-        if _db_mode_enabled():
+        if db_mode_enabled():
             ensure_files()
         _render_user_badge()
         return
 
-    if _db_mode_enabled():
+    if db_mode_enabled():
         _db_auth_gate()
         return
 
@@ -1575,7 +1576,8 @@ def _db_auth_gate() -> None:
                 if ok:
                     auth.sign_in(st, info)
                     st.rerun()
-                st.error(info)
+                else:
+                    st.error(info)
     with tab_reg:
         with st.form("db_register"):
             nu = st.text_input("用户名（3-20 位字母数字下划线）", key="db_reg_u")
@@ -1592,7 +1594,8 @@ def _db_auth_gate() -> None:
 
 
 def _render_user_badge() -> None:
-    u = st.session_state.get("efa_user") or st.session_state["_efa_user"]
+    u = (st.session_state.get("efa_user")
+         or st.session_state.get("_efa_user") or {})
     name = u.get("username") or u.get("name", "用户")
     role = u.get("role", "用户")
     st.sidebar.markdown("---")
@@ -1695,10 +1698,14 @@ def render_sidebar() -> None:
     configured = load_standards()
     configured = int((configured["是否评分"] == "是").sum()) if not configured.empty else 0
     st.sidebar.write(f"已配置评分标准：{configured} 组")
-    st.sidebar.caption("数据保存在项目 `data` 文件夹的 CSV 中，可直接用 Excel 打开、复制备份。")
+    if db_mode_enabled():
+        st.sidebar.caption("数据按账号独立保存在云端数据库，换设备登录后自动同步。")
+    else:
+        st.sidebar.caption("数据保存在项目 `data` 文件夹的 CSV 中，可直接用 Excel 打开、复制备份。")
     st.sidebar.markdown("---")
     st.sidebar.caption(f"系统 {APP_VERSION} ｜ 常模：{STANDARDS_VERSION}")
-    st.sidebar.caption("Python + Streamlit · 本地运行，数据不上传")
+    st.sidebar.caption("Python + Streamlit · 云端账号独立存储" if db_mode_enabled()
+                      else "Python + Streamlit · 本地运行，数据不上传")
 
 
 def empty_state(message: str = "目前还没有数据。") -> None:
