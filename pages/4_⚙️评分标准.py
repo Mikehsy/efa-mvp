@@ -21,7 +21,7 @@ st.markdown(f"""<div class="card note">
 静息心率、30米冲刺、Yo-Yo、引体向上、纵跳等有出处项已替换为已确认常模（中国足协 / 协和 /
 国家学生体质标准 / 临床规范，逐项出处见 confirmed_standards.py 与 docs），其余仍为示例常模，
 请按本队实测替换。未配置（是否评分 = 否 或阈值留空）的组合不评分，成绩显示「—」；
-计分按达标线=0 分、优秀线=100 分换算，阈值一经修改，历史得分全部实时重算。</p></div>""", unsafe_allow_html=True)
+计分按三段式换算：低限线=0 分、达标线=60 分、优秀线=100 分，历史得分随阈值实时重算。</p></div>""", unsafe_allow_html=True)
 
 std = load_standards()
 tab_edit, tab_pending, tab_custom = st.tabs(["阈值表格编辑", "待配置清单", "自定义项目"])
@@ -47,13 +47,14 @@ with tab_edit:
     if view.empty:
         st.info("该分组暂无标准行。可在「自定义项目」新增项目，或在「待配置清单」恢复内置示例标准。")
     else:
-        editable = view[["测试项目", "类别", "单位", "方向", "达标线", "优秀线",
+        editable = view[["测试项目", "类别", "单位", "方向", "低限线", "达标线", "优秀线",
                          "评分类型", "是否评分"]].reset_index(drop=True)
         edited = st.data_editor(
             editable, hide_index=True, width="stretch", num_rows="fixed",
             disabled=["测试项目", "类别", "单位", "评分类型"],
             column_config={
                 "测试项目": st.column_config.TextColumn("测试项目", width="medium"),
+                "低限线": st.column_config.NumberColumn("低限线（0 分）", format="%.2f"),
                 "达标线": st.column_config.NumberColumn("达标线（60 分）", format="%.2f"),
                 "优秀线": st.column_config.NumberColumn("优秀线（100 分）", format="%.2f"),
                 "方向": st.column_config.SelectboxColumn("方向", options=["越大越好", "越小越好"]),
@@ -66,9 +67,9 @@ with tab_edit:
             for _, r in edited.iterrows():
                 mask = ((full["测试项目"] == r["测试项目"]) & (full["性别"] == gender)
                         & (full["年龄组"] == ag))
-                for c in ("达标线", "优秀线", "方向", "是否评分"):
+                for c in ("低限线", "达标线", "优秀线", "方向", "是否评分"):
                     full.loc[mask, c] = r[c]
-            for c in ("达标线", "优秀线"):
+            for c in ("低限线", "达标线", "优秀线"):
                 full[c] = pd.to_numeric(full[c], errors="coerce")
             save_standards(full)
             st.success("已保存。历史记录的得分 / 等级会按新阈值自动重算。")
@@ -79,16 +80,17 @@ with tab_pending:
     pending = std[(std["是否评分"].astype(str) != "是")
                   | std["达标线"].isna() | std["优秀线"].isna()].copy()
     st.metric("待配置组合数", f"{len(pending)} / {len(std)}")
-    st.caption("以下组合不评分，录入成绩时得分显示「—」。在「阈值表格编辑」里补齐达标线 / 优秀线"
+    st.caption("以下组合不评分，录入成绩时得分显示「—」。在「阈值表格编辑」里补齐低限线 / 达标线 / 优秀线"
                "并把「是否评分」改为「是」即可启用。")
     if pending.empty:
         st.success("全部组合均已配置。")
     else:
         st.dataframe(
             pending[["测试项目", "性别", "年龄组", "类别", "单位", "方向",
-                     "达标线", "优秀线", "是否评分"]],
+                     "低限线", "达标线", "优秀线", "是否评分"]],
             width="stretch", hide_index=True,
-            column_config={"达标线": st.column_config.NumberColumn("达标线", format="%.2f"),
+            column_config={"低限线": st.column_config.NumberColumn("低限线", format="%.2f"),
+                           "达标线": st.column_config.NumberColumn("达标线", format="%.2f"),
                            "优秀线": st.column_config.NumberColumn("优秀线", format="%.2f")})
         grouped = (pending.groupby(["年龄组", "性别"]).size().reset_index(name="待配置数"))
         st.markdown("**按分组汇总**")
@@ -123,28 +125,34 @@ with tab_custom:
         kind = st.selectbox("评分类型", ["continuous", "descriptive"],
                             format_func=lambda x: "continuous（0～100 分）" if x == "continuous"
                             else "descriptive（仅记录不评分）")
-        v1, v2 = st.columns(2)
+        v1, v2, v3 = st.columns(3)
         with v1:
-            pass_line = st.number_input("达标线（60 分）", value=0.0, step=0.1, format="%.2f")
+            low_line = st.number_input("低限线（0 分）", value=0.0, step=0.1, format="%.2f")
         with v2:
+            pass_line = st.number_input("达标线（60 分）", value=0.0, step=0.1, format="%.2f")
+        with v3:
             excellent_line = st.number_input("优秀线（100 分）", value=0.0, step=0.1, format="%.2f")
-        enabled = st.checkbox("立即启用评分（需填好达标线 / 优秀线）", value=False)
+        enabled = st.checkbox("立即启用评分（需填好低限线 / 达标线 / 优秀线）", value=False)
         submitted = st.form_submit_button("新增自定义项目", type="primary", width="stretch")
 
     if submitted:
         clean = name.strip()
-        usable = (kind == "continuous" and enabled and pass_line != excellent_line
-                  and pass_line != 0 and excellent_line != 0)
+        ordered = (low_line > pass_line > excellent_line if direction == "越小越好"
+                   else low_line < pass_line < excellent_line)
+        usable = kind == "continuous" and enabled and ordered
         if not clean:
             st.error("请填写项目名称。")
         elif clean in existing:
             st.error("该项目已存在，请换一个名称。")
+        elif kind == "continuous" and enabled and not ordered:
+            st.error("三条线顺序不正确：越大越好需低限线 < 达标线 < 优秀线；越小越好需反向。")
         else:
             rows = []
             for g in GENDERS:
                 for a in AGE_GROUPS:
                     rows.append({
                         "测试项目": clean, "性别": g, "年龄组": a,
+                        "低限线": low_line if usable else "",
                         "达标线": pass_line if usable else "",
                         "优秀线": excellent_line if usable else "",
                         "单位": unit.strip(), "方向": direction,
