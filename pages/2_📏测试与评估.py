@@ -90,7 +90,7 @@ with tab_single:
         else:
             st.markdown(f"""<div class="card">
             <b>{item} · 参考标准（{group}）</b>
-            <p class="hint">达标线：{ref['pass']:g} {ref['unit']}（60 分）<br>
+            <p class="hint">达标线：{ref['pass']:g} {ref['unit']}（0 分）<br>
             优秀线：{ref['excellent']:g} {ref['unit']}（100 分）<br>
             方向：{ref['direction']}　｜　类别：{meta['类别']}</p></div>""", unsafe_allow_html=True)
         preview = calc_score(item, value, group, std) if meta["评分类型"] == "continuous" else None
@@ -287,7 +287,7 @@ with tab_history:
 
     with st.expander("评分口径说明"):
         st.markdown(
-            "- **continuous**：按「性别|年龄组」的达标线（60 分）/ 优秀线（100 分）线性换算 0～100 分，"
+            "- **continuous**：按「性别|年龄组」的达标线（0 分）/ 优秀线（100 分）线性换算 0～100 分，"
             "四档等级：优秀 >=90、良好 >=75、达标 >=60、待提升 <60；未配置组合显示「—」。\n"
             "- **ordinal（FMS）**：保留 0～3 原始分，双侧取较低侧，7 动作求和 0～21，<=14 为较高风险。\n"
             "- **binary**：排除性测试「通过 / 阳性」，阳性使对应动作记 0 分。\n"
