@@ -986,6 +986,19 @@ def load_standards() -> pd.DataFrame:
     df = load_table(STANDARD_FILE, STANDARD_COLS)
     for c in ("达标线", "优秀线"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    # 已确认常模在读取时覆盖：云端/本地既有标准表不必重建即可生效。
+    # 只覆盖 confirmed_standards.CONFIRMED 命中的组合，其余（含手工修改）保持不动。
+    try:
+        import confirmed_standards
+        for (item, gender, ag), (p_line, e_line, _src) in confirmed_standards.CONFIRMED.items():
+            mask = ((df["测试项目"] == item) & (df["性别"] == gender)
+                    & (df["年龄组"] == ag))
+            if mask.any():
+                df.loc[mask, "达标线"] = p_line
+                df.loc[mask, "优秀线"] = e_line
+                df.loc[mask, "是否评分"] = "是"
+    except ImportError:
+        pass
     return df
 
 
