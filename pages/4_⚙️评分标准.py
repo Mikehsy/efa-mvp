@@ -17,9 +17,11 @@ render_sidebar()
 
 st.markdown(f"""<div class="card note">
 <b>{STANDARDS_DISCLAIMER}</b>
-<p class="hint">内置的 270 行阈值为示意性示例常模：以原 9 项阈值为基准，按性别与年龄组缩放生成，
-并非专业常模。请按本队实测替换。未配置（是否评分 = 否 或阈值留空）的组合不评分，成绩显示「—」；
-阈值一经修改，历史得分全部按新值实时重算。</p></div>""", unsafe_allow_html=True)
+<p class="hint">内置 216 行阈值（27 项 × 2 性别 × 4 年龄组，已取消大师组）。其中握力、坐位体前屈、
+静息心率、30米冲刺、Yo-Yo、引体向上、纵跳等有出处项已替换为已确认常模（中国足协 / 协和 /
+国家学生体质标准 / 临床规范，逐项出处见 confirmed_standards.py 与 docs），其余仍为示例常模，
+请按本队实测替换。未配置（是否评分 = 否 或阈值留空）的组合不评分，成绩显示「—」；
+计分按达标线=0 分、优秀线=100 分换算，阈值一经修改，历史得分全部实时重算。</p></div>""", unsafe_allow_html=True)
 
 std = load_standards()
 tab_edit, tab_pending, tab_custom = st.tabs(["阈值表格编辑", "待配置清单", "自定义项目"])
@@ -94,10 +96,10 @@ with tab_pending:
 
     st.markdown("---")
     st.subheader("恢复 / 重建内置示例标准")
-    st.caption("会用 27 项 × 2 性别 × 5 年龄组 = 270 行示例常模覆盖当前标准表，"
-               "同时清除自定义项目与手工修改的阈值。")
-    confirm = st.checkbox("我确认要恢复内置示例标准")
-    if st.button("恢复内置示例标准（270 行）", disabled=not confirm, width="stretch"):
+    st.caption("会用 27 项 × 2 性别 × 4 年龄组 = 216 行内置标准覆盖当前标准表"
+               "（含已确认出处项，其余为示例常模），同时清除自定义项目与手工修改的阈值。")
+    confirm = st.checkbox("我确认要恢复内置标准")
+    if st.button("恢复内置标准（216 行）", disabled=not confirm, width="stretch"):
         save_standards(generate_default_standards())
         st.success("内置示例标准已恢复")
         st.rerun()
@@ -105,7 +107,7 @@ with tab_pending:
 # ------------------------------------------------------------------ 自定义项目
 with tab_custom:
     st.caption("新增的项目会自动出现在「测试与评估」的录入下拉框中；系统为它生成 "
-               "2 性别 × 5 年龄组共 10 行标准记录。")
+               "2 性别 × 4 年龄组共 8 行标准记录。")
     catalog = item_catalog()
     existing = set(catalog["测试项目"].astype(str))
 
