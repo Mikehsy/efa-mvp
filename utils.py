@@ -7,8 +7,9 @@
 * tests.csv：原 7 列之后追加「测试类别、评分类型、侧别、标准组、测试时年龄、疼痛标记、运动项目」。
   其中「运动项目」与「标准组」同为写入时快照，不随档案修改而漂移。
   得分 / 等级 / FMS总分 / 不对称标记 / 结果说明 / 结果显示 均为派生量，不落盘。
-* standards.csv：测试项目,性别,年龄组,达标线,优秀线,单位,方向,类别,评分类型,是否评分。
-  由 27 个 continuous 评分项 × 2 性别 × 5 年龄组 = 270 行程序生成，界面可编辑。
+* standards.csv：测试项目,性别,年龄组,低限线,达标线,优秀线,单位,方向,类别,评分类型,是否评分。
+  由 27 个 continuous 评分项 × 2 性别 × 4 年龄组 = 216 行程序生成，界面可编辑。
+  计分为三段式：低限线 0 分、达标线 60 分、优秀线 100 分；旧 10 列表在读取时自动补低限线。
 * 所有测试数据都通过「运动项目」快照与对应运动项目关联；load_table() 对缺列一律补空，
   可直接读取旧格式备份文件，迁移时按运动员档案回填快照。
 """
@@ -46,8 +47,63 @@ logger = get_logger()
 ATHLETE_COLS =["运动员ID", "姓名", "性别", "出生日期", "所属队伍", "专项", "备注", "运动项目"]
 TEST_COLS = ["记录ID", "运动员ID", "测试日期", "测试项目", "成绩", "单位", "备注",
              "测试类别", "评分类型", "侧别", "标准组", "测试时年龄", "疼痛标记", "运动项目"]
-STANDARD_COLS = ["测试项目", "性别", "年龄组", "达标线", "优秀线", "单位", "方向",
+STANDARD_COLS = ["测试项目", "性别", "年龄组", "低限线", "达标线", "优秀线", "单位", "方向",
                  "类别", "评分类型", "是否评分"]
+
+LOW_SCORE = 0.0
+PASS_SCORE = 60.0
+EXCELLENT_SCORE = 100.0
+
+
+def derive_low_line(pass_line, excellent_line, direction: str) -> float:
+    """由达标线/优秀线推导 0 分低限线。
+
+    默认取与「达标线→优秀线」等长的一段；对非负指标把低限线截到 0。
+    这样旧标准表即使没有低限线，也能在内存中无缝兼容。
+    """
+    p = float(pass_line)
+    e = float(excellent_line)
+    span = abs(e - p)
+    if str(direction) == "越小越好":
+        low = p + span
+    else:
+        low = max(0.0, p - span)
+    return round(low, 2)
+
+
+def _valid_three_lines(low, pass_line, excellent_line, direction: str) -> bool:
+    """三条线必须严格有序，且低限线在较差方向。"""
+    if low is None or pass_line is None or excellent_line is None:
+        return False
+    if pd.isna(low) or pd.isna(pass_line) or pd.isna(excellent_line):
+        return False
+    low, p, e = float(low), float(pass_line), float(excellent_line)
+    if str(direction) == "越小越好":
+        return low > p > e
+    return low < p < e
+
+
+def _score_from_three_lines(value: float, low: float, pass_line: float,
+                            excellent_line: float, direction: str) -> float:
+    """三段式线性计分：低限 0、达标 60、优秀 100。"""
+    v = float(value)
+    if str(direction) == "越小越好":
+        if v >= low:
+            return LOW_SCORE
+        if v > pass_line:
+            return round((low - v) / (low - pass_line) * PASS_SCORE, 1)
+        if v > excellent_line:
+            return round(PASS_SCORE + (pass_line - v) / (pass_line - excellent_line)
+                         * (EXCELLENT_SCORE - PASS_SCORE), 1)
+        return EXCELLENT_SCORE
+    if v <= low:
+        return LOW_SCORE
+    if v < pass_line:
+        return round((v - low) / (pass_line - low) * PASS_SCORE, 1)
+    if v < excellent_line:
+        return round(PASS_SCORE + (v - pass_line) / (excellent_line - pass_line)
+                     * (EXCELLENT_SCORE - PASS_SCORE), 1)
+    return EXCELLENT_SCORE
 
 TABLES = {
     "athlete": (ATHLETE_FILE, ATHLETE_COLS, "运动员ID"),
@@ -480,7 +536,7 @@ def generate_default_standards() -> pd.DataFrame:
     """生成 27 项 × 2 性别 × 4 年龄组 = 216 行内置常模。
 
     底座为示例常模；已确认有出处的组合由 confirmed_standards.CONFIRMED 覆盖。
-    来源出处在 docs/ 与 confirmed_standards.py 中追溯，不改变 10 列数据结构。
+    来源出处在 docs/ 与 confirmed_standards.py 中追溯；新增低限线后为 11 列结构。
     """
     import confirmed_standards
     rows = []
@@ -497,8 +553,10 @@ def generate_default_standards() -> pd.DataFrame:
                 if hit:
                     pass_line, excellent_line = hit[0], hit[1]
                     configured = True
+                low_line = derive_low_line(pass_line, excellent_line, s["direction"])
                 rows.append({
                     "测试项目": item, "性别": gender, "年龄组": ag,
+                    "低限线": round(low_line, 2) if configured else "",
                     "达标线": round(pass_line, 2) if configured else "",
                     "优秀线": round(excellent_line, 2) if configured else "",
                     "单位": s["unit"], "方向": s["direction"], "类别": s["category"],
@@ -984,7 +1042,9 @@ def _fill_sport(rows: list[dict]) -> list[dict]:
 
 def load_standards() -> pd.DataFrame:
     df = load_table(STANDARD_FILE, STANDARD_COLS)
-    for c in ("达标线", "优秀线"):
+    if "低限线" not in df.columns:
+        df["低限线"] = ""
+    for c in ("低限线", "达标线", "优秀线"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     # 已确认常模在读取时覆盖：云端/本地既有标准表不必重建即可生效。
     # 只覆盖 confirmed_standards.CONFIRMED 命中的组合，其余（含手工修改）保持不动。
@@ -999,6 +1059,13 @@ def load_standards() -> pd.DataFrame:
                 df.loc[mask, "是否评分"] = "是"
     except ImportError:
         pass
+    # 三段式兼容：旧表无低限线或低限线顺序错误时，按达标/优秀线内存推导。
+    for idx, row in df.iterrows():
+        p, e, low = row.get("达标线"), row.get("优秀线"), row.get("低限线")
+        direction = str(row.get("方向") or "越大越好")
+        if pd.notna(p) and pd.notna(e) and float(p) != float(e):
+            if not _valid_three_lines(low, p, e, direction):
+                df.at[idx, "低限线"] = derive_low_line(p, e, direction)
     return df
 
 
@@ -1148,14 +1215,18 @@ def lookup_standard(std: pd.DataFrame, item: str, group: str) -> dict | None:
     p, e = r.get("达标线"), r.get("优秀线")
     if p is None or e is None or pd.isna(p) or pd.isna(e) or float(p) == float(e):
         return None
-    return {"pass": float(p), "excellent": float(e),
-            "direction": _clean(r.get("方向")) or "越大越好",
-            "unit": _clean(r.get("单位"))}
+    direction = _clean(r.get("方向")) or "越大越好"
+    low = r.get("低限线") if "低限线" in r else None
+    if not _valid_three_lines(low, p, e, direction):
+        low = derive_low_line(p, e, direction)
+    return {"low": float(low), "pass": float(p), "excellent": float(e),
+            "direction": direction, "unit": _clean(r.get("单位"))}
 
 
 def calc_score(item: str, value, group: str, std: pd.DataFrame | None = None) -> float | None:
-    """评分器按「评分类型」分派：仅 continuous 线性换算 0～100 分。
+    """评分器按「评分类型」分派：仅 continuous 做三段式 0～100 分换算。
 
+    低限线=0 分、达标线=60 分、优秀线=100 分；超出区间按 0 / 100 封顶。
     ordinal（FMS 0～3）、binary（排除性测试）、descriptive（身高/体重/BMI）
     均返回 None —— 绝不进入平均体能得分、达标率或 0～100 坐标轴。
     """
@@ -1164,12 +1235,8 @@ def calc_score(item: str, value, group: str, std: pd.DataFrame | None = None) ->
     s = lookup_standard(load_standards() if std is None else std, item, group)
     if s is None:
         return None
-    p, e = float(value), s["pass"]
-    ratio = ((s["pass"] - p) / (s["pass"] - s["excellent"])
-             if s["direction"] == "越小越好"
-             else (p - s["pass"]) / (s["excellent"] - s["pass"]))
-    # G1 推荐方案：达标线=0 分起点，优秀线=100 分；低于达标记 0，高于优秀封顶 100。
-    return round(max(0.0, min(100.0, ratio * 100)), 1)
+    return _score_from_three_lines(float(value), s["low"], s["pass"],
+                                   s["excellent"], s["direction"])
 
 
 def is_positive(row) -> bool:
@@ -1256,34 +1323,57 @@ def load_tests() -> pd.DataFrame:
                         ("单位", units), ("运动项目", sports)):
         df[col] = values
 
-    # 得分 / 等级 / 结果显示：一次性构建常模查表后向量化，避免逐行过滤 270 行标准表。
+    # 得分 / 等级 / 结果显示：一次性构建常模查表后向量化，避免逐行过滤 216 行标准表。
     usable = std[(std["是否评分"].astype(str) == "是")
                  & (std["评分类型"].astype(str) == "continuous")].copy()
-    usable["达标线"] = pd.to_numeric(usable["达标线"], errors="coerce")
-    usable["优秀线"] = pd.to_numeric(usable["优秀线"], errors="coerce")
+    if "低限线" not in usable.columns:
+        usable["低限线"] = float("nan")
+    for c in ("低限线", "达标线", "优秀线"):
+        usable[c] = pd.to_numeric(usable[c], errors="coerce")
     usable = usable.dropna(subset=["达标线", "优秀线"])
     usable = usable[usable["达标线"] != usable["优秀线"]]
-    std_map = {
-        (str(item), f"{gender}|{ag}"): (float(p_line), float(e_line), str(direction))
-        for item, gender, ag, p_line, e_line, direction in zip(
+    std_map = {}
+    for item, gender, ag, low_line, p_line, e_line, direction in zip(
             usable["测试项目"], usable["性别"], usable["年龄组"],
-            usable["达标线"], usable["优秀线"], usable["方向"])
-    }
+            usable["低限线"], usable["达标线"], usable["优秀线"], usable["方向"]):
+        direction = str(direction)
+        if not _valid_three_lines(low_line, p_line, e_line, direction):
+            low_line = derive_low_line(p_line, e_line, direction)
+        std_map[(str(item), f"{gender}|{ag}")] = (
+            float(low_line), float(p_line), float(e_line), direction)
     params = [std_map.get((item, group))
               for item, group in zip(df["测试项目"].astype(str), df["标准组"].astype(str))]
-    pass_line = pd.Series([x[0] if x else float("nan") for x in params],
-                          index=df.index, dtype=float)
-    exc_line = pd.Series([x[1] if x else float("nan") for x in params],
+    low_line = pd.Series([x[0] if x else float("nan") for x in params],
                          index=df.index, dtype=float)
-    smaller = pd.Series([bool(x and x[2] == "越小越好") for x in params],
+    pass_line = pd.Series([x[1] if x else float("nan") for x in params],
+                          index=df.index, dtype=float)
+    exc_line = pd.Series([x[2] if x else float("nan") for x in params],
+                         index=df.index, dtype=float)
+    smaller = pd.Series([bool(x and x[3] == "越小越好") for x in params],
                         index=df.index, dtype=bool)
     value = df["成绩数值"]
-    denom_big = (exc_line - pass_line).replace(0, float("nan"))
-    denom_small = (pass_line - exc_line).replace(0, float("nan"))
-    ratio = ((value - pass_line) / denom_big).where(
-        ~smaller, (pass_line - value) / denom_small)
-    # G1 推荐方案：达标线=0 分、优秀线=100 分（与 calc_score 保持一致）。
-    score = (ratio * 100).clip(0, 100).round(1)
+    den_low_big = (pass_line - low_line).replace(0, float("nan"))
+    den_big = (exc_line - pass_line).replace(0, float("nan"))
+    den_low_small = (low_line - pass_line).replace(0, float("nan"))
+    den_small = (pass_line - exc_line).replace(0, float("nan"))
+    score = pd.Series(float("nan"), index=df.index, dtype=float)
+    big = ~smaller
+    score = score.mask(big & value.le(low_line), LOW_SCORE)
+    score = score.mask(big & value.gt(low_line) & value.lt(pass_line),
+                       (value - low_line) / den_low_big * PASS_SCORE)
+    score = score.mask(big & value.ge(pass_line) & value.lt(exc_line),
+                       PASS_SCORE + (value - pass_line) / den_big
+                       * (EXCELLENT_SCORE - PASS_SCORE))
+    score = score.mask(big & value.ge(exc_line), EXCELLENT_SCORE)
+    score = score.mask(smaller & value.ge(low_line), LOW_SCORE)
+    score = score.mask(smaller & value.lt(low_line) & value.gt(pass_line),
+                       (low_line - value) / den_low_small * PASS_SCORE)
+    score = score.mask(smaller & value.le(pass_line) & value.gt(exc_line),
+                       PASS_SCORE + (pass_line - value) / den_small
+                       * (EXCELLENT_SCORE - PASS_SCORE))
+    score = score.mask(smaller & value.le(exc_line), EXCELLENT_SCORE)
+    # 三段式：低限线 0 分、达标线 60 分、优秀线 100 分（与 calc_score 保持一致）。
+    score = score.clip(0, 100).round(1)
     score = score.where((df["评分类型"] == "continuous") & score.notna(), float("nan"))
     df["得分"] = score
     df["等级"] = (pd.cut(score, bins=[float("-inf"), 60, 75, 90, float("inf")],

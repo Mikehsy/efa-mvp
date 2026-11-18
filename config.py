@@ -45,6 +45,6 @@ BACKUP_KEEP = int(os.getenv("EFA_BACKUP_KEEP", 30))
 APP_VERSION = "1.0.0-dev"
 STANDARDS_VERSION = os.getenv(
     "EFA_STANDARDS_VERSION",
-    "确认常模 v1（2026-11-18：取消大师组+有出处项已替换，其余仍为示例，待队内实测）")
+    "确认常模 v2（2026-11-18：三段式评分，低限线0/达标线60/优秀线100；取消大师组+有出处项已替换）")
 
 DATA_FILES = (ATHLETE_FILE, TEST_FILE, STANDARD_FILE)
