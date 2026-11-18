@@ -1540,8 +1540,9 @@ def require_access_gate() -> None:
     import os
 
     if st.session_state.get("efa_user") or st.session_state.get("_efa_user"):
-        # DB 模式下每次 rerun 确保当前用户数据已初始化。
+        # 顺序不可颠倒：同意失效时不得再初始化/写入任何业务数据。
         if db_mode_enabled():
+            _privacy_gate()
             ensure_files()
         _render_user_badge()
         return
@@ -1597,9 +1598,10 @@ def require_access_gate() -> None:
 
 
 def _db_auth_gate() -> None:
-    """数据库模式：用户自助注册 / 登录。"""
+    """数据库模式：用户自助注册 / 登录（注册须取得 PIPL 知情同意）。"""
     import auth
     import db as _db
+    import privacy
     _db.init_db()
     st.title("🔐 运动员体能与功能评估系统")
     st.caption("免费试用版 · 注册后即可使用，数据按账号独立保存。")
@@ -1621,13 +1623,93 @@ def _db_auth_gate() -> None:
             em = st.text_input("邮箱（选填）", key="db_reg_e")
             np = st.text_input("密码（至少 6 位）", type="password", key="db_reg_p")
             cp = st.text_input("确认密码", type="password", key="db_reg_c")
+            st.markdown("**注册前请阅读并同意《隐私政策》**")
+            with st.expander(f"《隐私政策》全文（版本 {privacy.POLICY_VERSION}）"):
+                st.markdown(privacy.policy_text())
+            if not privacy.operator_configured():
+                st.warning("运营主体名称与个人信息保护负责人联系方式尚未配置，"
+                           "正式商用前必须由运营方填写真实信息。")
+            picked = [key for key, label, _ in privacy.CONSENT_ITEMS
+                      if st.checkbox(label, key=f"efa_reg_consent_{key}")]
             if st.form_submit_button("注册", type="primary"):
                 if np != cp:
                     st.error("两次输入的密码不一致。")
                 else:
-                    ok, msg = auth.register(nu, np, em)
+                    ok, msg = auth.register(nu, np, em, consents=picked,
+                                            policy_version=privacy.POLICY_VERSION)
                     (st.success(msg) if ok else st.error(msg))
     st.stop()
+
+
+def _privacy_gate() -> None:
+    """PIPL 闸口：未就现行政策取得有效同意时，只允许重新同意、删除数据或退出。
+
+    按 (用户, 政策版本) 缓存校验结果，避免每次 rerun 都查库（云端往返很贵）。
+    撤回同意、重新同意、注销后由调用方清除该缓存。
+    """
+    import auth
+    import db as _db
+    import privacy
+    u = st.session_state.get("efa_user") or {}
+    uid = u.get("id")
+    if not uid:
+        return
+    cache_key = (uid, privacy.POLICY_VERSION)
+    if st.session_state.get("_efa_consent_ok") == cache_key:
+        return
+    user = _db.get_user_by_id(uid)
+    if not user:
+        # 账号已被删除（例如另一个标签页完成注销），清理残留会话。
+        auth.sign_out(st)
+        st.rerun()
+        return
+    status = auth.consent_status(user)
+    if status == auth.CONSENT_OK:
+        st.session_state["_efa_consent_ok"] = cache_key
+        return
+    _render_reconsent(user, status)
+    st.stop()
+
+
+def _render_reconsent(user: dict | None, status: str) -> None:
+    """政策升级 / 历史账号 / 撤回同意后的唯一可达界面。"""
+    import auth
+    import privacy
+    reasons = {
+        auth.CONSENT_MISSING: "尚未取得你的有效同意（或此账号注册于合规功能上线之前）。",
+        auth.CONSENT_WITHDRAWN: "你已撤回同意，基于同意的数据处理已停止。",
+        auth.CONSENT_VERSION: "隐私政策已更新，需就新版本重新取得你的同意。",
+    }
+    st.title("🔒 隐私政策与重新同意")
+    st.warning(reasons.get(status, "需要重新确认同意后方可继续使用。"))
+    st.caption(f"当前政策版本：{privacy.POLICY_VERSION}　运营主体：{privacy.OPERATOR_NAME}")
+    with st.expander("阅读《隐私政策》全文", expanded=True):
+        st.markdown(privacy.policy_text())
+    if not privacy.operator_configured():
+        st.warning("运营主体名称与个人信息保护负责人联系方式尚未配置，"
+                   "正式商用前必须由运营方填写真实信息。")
+    with st.form("efa_reconsent"):
+        picked = [key for key, label, _ in privacy.CONSENT_ITEMS
+                  if st.checkbox(label, key=f"efa_reconsent_{key}")]
+        if st.form_submit_button("同意并继续使用", type="primary"):
+            ok, msg = auth.grant_consent(user["id"], picked)
+            if ok:
+                st.session_state.pop("_efa_consent_ok", None)
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+    st.markdown("---")
+    st.caption("不同意也可以直接删除账号与全部数据；删除后不可恢复。")
+    if st.checkbox("我不再使用本服务，要求删除账号及全部个人数据",
+                   key="efa_reconsent_delete_check"):
+        if st.button("确认删除账号与数据"):
+            auth.delete_account(user["id"])
+            auth.sign_out(st)
+            st.rerun()
+    if st.button("退出登录"):
+        auth.sign_out(st)
+        st.rerun()
 
 
 def _render_user_badge() -> None:
@@ -1647,6 +1729,9 @@ def inject_css() -> None:
     install_error_hooks()
     st.markdown("""
     <style>
+        /* 兜底：半角 ~ 被 Markdown 误解析成删除线时不显示横线。
+           显示文本已统一用全角 ～，此规则防止任何遗漏页面再次出现划掉的文字。 */
+        del, s, strike {text-decoration: none !important;}
         .main .block-container {padding-top: 1.8rem; max-width: 1400px;}
 
         /* ---- 页头 hero：图标与标题同行对齐 ---- */

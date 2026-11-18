@@ -63,6 +63,25 @@ CREATE TABLE IF NOT EXISTS user_data (
 )
 """
 
+# PIPL 第 13/14/16 条：同意、撤回、重新同意、注销等处理活动须可追溯留痕。
+# 只存去标识化的 owner_hash（由 privacy.owner_hash 生成），账号注销删除全部
+# 个人信息后仍能证明处理活动的合法性，且留痕本身不含可直接识别个人的信息。
+DDL_CONSENTS = """
+CREATE TABLE IF NOT EXISTS consents (
+    id             {ID} PRIMARY KEY {AUTO},
+    owner_hash     TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    items          TEXT NOT NULL,
+    action         TEXT NOT NULL,
+    ts             TEXT NOT NULL,
+    detail         TEXT
+)
+"""
+
+DDL_CONSENT_IDX = """
+CREATE INDEX IF NOT EXISTS idx_consents_owner ON consents(owner_hash, id)
+"""
+
 
 # ------------------------------------------------------------------ 建表（并发安全）
 # PostgreSQL 的 CREATE TABLE IF NOT EXISTS 并非原子：多会话并发时可能同时
@@ -144,10 +163,13 @@ def _ensure_schema() -> None:
             cur = conn.cursor()
             if IS_PG:
                 cur.execute("SELECT pg_advisory_xact_lock(%s)", (_ADVISORY_KEY,))
-            cur.execute(DDL_USERS.format(
+            ddl_args = dict(
                 ID="BIGSERIAL" if IS_PG else "INTEGER",
-                AUTO="" if IS_PG else "AUTOINCREMENT"))
+                AUTO="" if IS_PG else "AUTOINCREMENT")
+            cur.execute(DDL_USERS.format(**ddl_args))
             cur.execute(DDL_DATA)
+            cur.execute(DDL_CONSENTS.format(**ddl_args))
+            cur.execute(DDL_CONSENT_IDX)
             conn.commit()
             _SCHEMA_READY = True
         except Exception as exc:
@@ -165,11 +187,13 @@ def _tables_exist(conn) -> bool:
     try:
         cur = conn.cursor()
         if IS_PG:
-            cur.execute("SELECT to_regclass('public.users'), to_regclass('public.user_data')")
+            cur.execute("SELECT to_regclass('public.users'), to_regclass('public.user_data'), "
+                        "to_regclass('public.consents')")
             row = cur.fetchone()
-            return bool(row and row[0] and row[1])
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('users','user_data')")
-        return len(cur.fetchall()) == 2
+            return bool(row and row[0] and row[1] and row[2])
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('users','user_data','consents')")
+        return len(cur.fetchall()) == 3
     except Exception:
         return False
 
@@ -242,6 +266,71 @@ def user_count() -> int:
         return int(cur.fetchone()[0])
 
 
+def _as_id(owner_id):
+    """users.id 是整数列；Cloud 会话里可能是字符串，统一转换避免 PG 类型不匹配。"""
+    try:
+        return int(owner_id)
+    except (TypeError, ValueError):
+        return owner_id
+
+
+def get_user_by_id(owner_id):
+    """PIPL 第 45 条：按 ID 取账号信息，供个人数据查阅/复制使用。"""
+    with connect() as (conn, ph):
+        cur = _exec(conn.cursor(), "SELECT * FROM users WHERE id=?", ph, (_as_id(owner_id),))
+        row = cur.fetchone()
+        cols = [d[0] for d in cur.description] if (IS_PG and row) else None
+    if not row:
+        return None
+    if cols:
+        return dict(zip(cols, row))
+    return dict(row)
+
+
+def set_user_status(owner_id, status: str) -> None:
+    """撤回同意时停用账号；重新同意后恢复。"""
+    with connect() as (conn, ph):
+        _exec(conn.cursor(), "UPDATE users SET status=? WHERE id=?", ph,
+              (status, _as_id(owner_id)))
+
+
+def last_data_write(owner_id):
+    """最后一次写入业务数据的时间，用于展示保存期限起算点。"""
+    with connect() as (conn, ph):
+        cur = _exec(conn.cursor(),
+                    "SELECT MAX(updated_at) FROM user_data WHERE owner_id=?",
+                    ph, (str(owner_id),))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def delete_account_data(owner_id) -> None:
+    """PIPL 第 47 条：注销即删除账号信息与全部业务数据（不可逆）。
+
+    consents 表只含去标识化的 owner_hash，作为合法性证明依法留存，不随账号删除。
+    """
+    with connect() as (conn, ph):
+        cur = conn.cursor()
+        _exec(cur, "DELETE FROM user_data WHERE owner_id=?", ph, (str(owner_id),))
+        _exec(cur, "DELETE FROM users WHERE id=?", ph, (_as_id(owner_id),))
+
+
+def expired_owner_ids(days: int) -> list[str]:
+    """返回最后一次写入已超过 days 天的账号 ID，供运营方按留存策略清理。
+
+    这里刻意不做自动删除：删除个人信息不可逆，须由运营方依据 PIA 结论、
+    经复核后调用 delete_account_data()。
+    """
+    from datetime import timedelta
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    with connect() as (conn, ph):
+        cur = _exec(conn.cursor(),
+                    "SELECT DISTINCT owner_id FROM user_data WHERE updated_at < ?",
+                    ph, (cutoff,))
+        rows = cur.fetchall()
+    return [str(r[0]) for r in rows]
+
+
 # ------------------------------------------------------------------ 业务数据（JSON blob，按 owner+kind）
 def load_frame(owner_id, kind: str):
     """返回 (records, cols)；无数据返回 (None, None)。"""
@@ -273,3 +362,66 @@ def has_data(owner_id) -> bool:
         cur = _exec(conn.cursor(), "SELECT 1 FROM user_data WHERE owner_id=? LIMIT 1",
                     ph, (str(owner_id),))
         return cur.fetchone() is not None
+
+
+# ------------------------------------------------------------------ 同意记录（PIPL 留痕）
+_CONSENT_COLS = ("id", "owner_hash", "policy_version", "items", "action", "ts", "detail")
+
+
+def record_consent(owner_hash: str, policy_version: str, items,
+                   action: str, detail: str = "") -> None:
+    """持久化一次同意/撤回/重新同意/注销事件。
+
+    owner_hash 为去标识化标识，不存用户名、邮箱等可直接识别个人的信息。
+    action: grant | reconsent | withdraw | delete
+    """
+    payload = json.dumps(sorted(set(items or [])), ensure_ascii=False)
+    with connect() as (conn, ph):
+        _exec(conn.cursor(),
+              "INSERT INTO consents(owner_hash,policy_version,items,action,ts,detail) "
+              "VALUES(?,?,?,?,?,?)", ph,
+              (str(owner_hash), str(policy_version), payload, action, now(),
+               (detail or "")[:500]))
+
+
+def _row_to_dict(row) -> dict:
+    if IS_PG or not hasattr(row, "keys"):
+        return dict(zip(_CONSENT_COLS, row))
+    return dict(row)
+
+
+def latest_consent(owner_hash: str):
+    """最近一条同意事件；无记录返回 None（历史账号需重新同意）。"""
+    with connect() as (conn, ph):
+        cur = _exec(conn.cursor(),
+                    "SELECT id,owner_hash,policy_version,items,action,ts,detail "
+                    "FROM consents WHERE owner_hash=? ORDER BY id DESC LIMIT 1",
+                    ph, (str(owner_hash),))
+        row = cur.fetchone()
+    if not row:
+        return None
+    rec = _row_to_dict(row)
+    try:
+        rec["items"] = json.loads(rec["items"])
+    except (TypeError, ValueError):
+        rec["items"] = []
+    return rec
+
+
+def list_consents(owner_hash: str) -> list[dict]:
+    """按时间顺序返回全部同意事件，供个人数据导出与争议追溯。"""
+    with connect() as (conn, ph):
+        cur = _exec(conn.cursor(),
+                    "SELECT id,owner_hash,policy_version,items,action,ts,detail "
+                    "FROM consents WHERE owner_hash=? ORDER BY id",
+                    ph, (str(owner_hash),))
+        rows = cur.fetchall()
+    out = []
+    for row in rows:
+        rec = _row_to_dict(row)
+        try:
+            rec["items"] = json.loads(rec["items"])
+        except (TypeError, ValueError):
+            rec["items"] = []
+        out.append(rec)
+    return out
