@@ -128,10 +128,11 @@ def _kind_from_path(path) -> str:
             "standards.csv": "standards"}.get(name, name)
 
 GENDERS = ["男", "女"]
-AGE_GROUPS = ["U16", "U18", "U20", "成年", "大师"]
+# 用户确认：取消大师组，35 岁及以上并入成年组。年龄组由 5 组缩减为 4 组。
+AGE_GROUPS = ["U16", "U18", "U20", "成年"]
 AGE_GROUP_LABEL = {
     "U16": "U16（<16 岁）", "U18": "U18（16-17 岁）", "U20": "U20（18-19 岁）",
-    "成年": "成年（20-34 岁）", "大师": "大师（>=35 岁）",
+    "成年": "成年（>=20 岁，含原大师组）",
 }
 FMS_RISK_LINE = 14
 STANDARDS_DISCLAIMER = "非专业常模，请按本队实测替换"
@@ -200,12 +201,11 @@ FMS_CLEARING = {
 FMS_BILATERAL = {name for name, bilateral, _ in FMS_MOVEMENTS if bilateral}
 
 # 示例常模缩放系数：以「成年男」为 1.00，其余按年龄组 / 性别缩放。
-AGE_FACTOR = {"U16": 0.80, "U18": 0.92, "U20": 0.98, "成年": 1.00, "大师": 0.88}
+AGE_FACTOR = {"U16": 0.80, "U18": 0.92, "U20": 0.98, "成年": 1.00}
 GENDER_FACTOR = {"男": 1.00, "女": 0.88}
 # 示意性留白：这些组合默认不评分，用于演示「待配置清单」与「—」。
 UNCONFIGURED = {
     "U16": {"深蹲1RM", "卧推1RM", "硬拉1RM"},
-    "大师": {"100米冲刺", "Yo-Yo间歇跑", "3000米跑", "最大摄氧量", "药球前抛", "硬拉1RM"},
 }
 
 # ---------------------------------------------------------------- 运动项目
@@ -396,9 +396,8 @@ def age_group(age) -> str:
         return "U18"
     if age < 20:
         return "U20"
-    if age < 35:
-        return "成年"
-    return "大师"
+    # 用户确认取消大师组：35 岁及以上并入成年组。
+    return "成年"
 
 
 def group_by_age(gender: str, age) -> str:
@@ -451,10 +450,39 @@ def ensure_files() -> None:
         atomic_write_csv(generate_default_standards(), STANDARD_FILE, snapshot=False)
     migrate_legacy_athletes()
     migrate_legacy_tests()
+    migrate_master_group()
+
+
+def migrate_master_group() -> None:
+    """一次性迁移：取消大师组后，把历史标准组快照「男|大师」「女|大师」改为成年。
+
+    只在本地 CSV 模式生效；DB 模式的数据由运营方按文档指引迁移。
+    幂等：无大师快照时不写文件。
+    """
+    try:
+        raw = pd.read_csv(TEST_FILE, encoding="utf-8-sig", dtype=str)
+    except Exception:
+        return
+    if raw.empty or "标准组" not in raw.columns:
+        return
+    mask = raw["标准组"].fillna("").astype(str).str.endswith("|大师")
+    if not mask.any():
+        return
+    n = int(mask.sum())
+    raw.loc[mask, "标准组"] = raw.loc[mask, "标准组"].astype(str).str.replace(
+        r"\|大师$", "|成年", regex=True)
+    atomic_write_csv(raw[TEST_COLS] if all(c in raw.columns for c in TEST_COLS) else raw,
+                     TEST_FILE)
+    audit("migrate_master_group", target=TEST_FILE.name, rows=n)
 
 
 def generate_default_standards() -> pd.DataFrame:
-    """程序生成 27 项 × 2 性别 × 5 年龄组 = 270 行内置示意性示例常模。"""
+    """生成 27 项 × 2 性别 × 4 年龄组 = 216 行内置常模。
+
+    底座为示例常模；已确认有出处的组合由 confirmed_standards.CONFIRMED 覆盖。
+    来源出处在 docs/ 与 confirmed_standards.py 中追溯，不改变 10 列数据结构。
+    """
+    import confirmed_standards
     rows = []
     for item, s in CONTINUOUS_ITEMS.items():
         for gender in GENDERS:
@@ -465,6 +493,10 @@ def generate_default_standards() -> pd.DataFrame:
                 else:
                     pass_line, excellent_line = s["pass"] * factor, s["excellent"] * factor
                 configured = item not in UNCONFIGURED.get(ag, set())
+                hit = confirmed_standards.lookup(item, gender, ag)
+                if hit:
+                    pass_line, excellent_line = hit[0], hit[1]
+                    configured = True
                 rows.append({
                     "测试项目": item, "性别": gender, "年龄组": ag,
                     "达标线": round(pass_line, 2) if configured else "",
@@ -1123,7 +1155,8 @@ def calc_score(item: str, value, group: str, std: pd.DataFrame | None = None) ->
     ratio = ((s["pass"] - p) / (s["pass"] - s["excellent"])
              if s["direction"] == "越小越好"
              else (p - s["pass"]) / (s["excellent"] - s["pass"]))
-    return round(max(0.0, min(100.0, 60 + ratio * 40)), 1)
+    # G1 推荐方案：达标线=0 分起点，优秀线=100 分；低于达标记 0，高于优秀封顶 100。
+    return round(max(0.0, min(100.0, ratio * 100)), 1)
 
 
 def is_positive(row) -> bool:
@@ -1161,6 +1194,11 @@ def load_tests() -> pd.DataFrame:
     """读取测试记录并派生全部得分 / 等级 / FMS 汇总字段（均不落盘）。"""
     df = load_table(TEST_FILE, TEST_COLS)
     df["运动员ID"] = df["运动员ID"].astype(str).str.strip()
+    # 取消大师组后的即时兼容：历史快照里残留的「|大师」在内存中映射为「|成年」，
+    # 使旧记录仍能命中 4 组标准；不修改底层数据。
+    if "标准组" in df.columns:
+        df["标准组"] = df["标准组"].astype(str).str.replace(
+            r"\|大师$", "|成年", regex=True)
     df["测试日期"] = pd.to_datetime(df["测试日期"], errors="coerce")
     df["成绩数值"] = pd.to_numeric(df["成绩"], errors="coerce").astype(float)
     if df.empty:
@@ -1231,7 +1269,8 @@ def load_tests() -> pd.DataFrame:
     denom_small = (pass_line - exc_line).replace(0, float("nan"))
     ratio = ((value - pass_line) / denom_big).where(
         ~smaller, (pass_line - value) / denom_small)
-    score = (60 + ratio * 40).clip(0, 100).round(1)
+    # G1 推荐方案：达标线=0 分、优秀线=100 分（与 calc_score 保持一致）。
+    score = (ratio * 100).clip(0, 100).round(1)
     score = score.where((df["评分类型"] == "continuous") & score.notna(), float("nan"))
     df["得分"] = score
     df["等级"] = (pd.cut(score, bins=[float("-inf"), 60, 75, 90, float("inf")],

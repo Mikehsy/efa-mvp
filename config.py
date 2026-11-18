@@ -43,6 +43,8 @@ SNAPSHOT_KEEP = int(os.getenv("EFA_SNAPSHOT_KEEP", 20))
 BACKUP_KEEP = int(os.getenv("EFA_BACKUP_KEEP", 30))
 
 APP_VERSION = "1.0.0-dev"
-STANDARDS_VERSION = os.getenv("EFA_STANDARDS_VERSION", "示例常模 v0（待队内实测替换）")
+STANDARDS_VERSION = os.getenv(
+    "EFA_STANDARDS_VERSION",
+    "确认常模 v1（2026-11-18：取消大师组+有出处项已替换，其余仍为示例，待队内实测）")
 
 DATA_FILES = (ATHLETE_FILE, TEST_FILE, STANDARD_FILE)
