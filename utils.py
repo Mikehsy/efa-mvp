@@ -2171,7 +2171,7 @@ def inject_css() -> None:
         nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"] [data-testid="stIconEmoji"]::after {
             font-size:14px !important; color:var(--cal-primary);
             font-family:Arial, "Segoe UI Symbol", sans-serif;}
-        nav[data-testid="stSidebarNav"] a[href="/"] [data-testid="stIconEmoji"]::after {content:"◈";}
+        nav[data-testid="stSidebarNav"] a:first-child [data-testid="stIconEmoji"]::after {content:"◈";}
         nav[data-testid="stSidebarNav"] a[href*="运动员管理"] [data-testid="stIconEmoji"]::after {content:"◎";}
         nav[data-testid="stSidebarNav"] a[href*="测试与评估"] [data-testid="stIconEmoji"]::after {content:"◉";}
         nav[data-testid="stSidebarNav"] a[href*="数据分析"] [data-testid="stIconEmoji"]::after {content:"▤";}
