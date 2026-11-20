@@ -14,9 +14,10 @@ gatherUsageStats = false
 # 开发调试时可临时改为 true。
 showErrorDetails = false
 
+# CALIBER 设计系统（见项目根 DESIGN.md）
 [theme]
-primaryColor = "#1e5b98"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f7fafd"
-textColor = "#1a2b42"
+primaryColor = "#18A58B"
+backgroundColor = "#F7F9FB"
+secondaryBackgroundColor = "#EEF3F7"
+textColor = "#102336"
 font = "sans serif"

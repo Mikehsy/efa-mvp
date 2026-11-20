@@ -17,9 +17,9 @@ from reports import (
 )
 from logging_config import log_exception
 from utils import (
-    SPORT_UNKNOWN, STANDARDS_DISCLAIMER, csv_download, empty_state, ensure_files,
-    escape_html, inject_css, item_catalog, load_athletes, load_tests, page_header,
-    plotly_font, render_sidebar,
+    SPORT_UNKNOWN, STANDARDS_DISCLAIMER, cal_advice, cal_report_title, csv_download,
+    empty_state, ensure_files, escape_html, inject_css, item_catalog, load_athletes,
+    load_tests, page_header, plotly_font, render_sidebar,
 )
 
 st.set_page_config(page_title="分析报告", page_icon="📝", layout="wide")
@@ -47,7 +47,7 @@ if unknown_count:
                "请到「01 运动员管理」补全档案中的运动项目，之后新录入的记录会自动带上项目快照。")
 
 # ------------------------------------------------------------------ ① 报告范围
-st.subheader("① 报告范围")
+cal_report_title("①", "报告范围")
 c1, c2 = st.columns([1, 1.5])
 with c1:
     mode = st.radio("报告模式", MODES, horizontal=True)
@@ -88,7 +88,7 @@ with c3:
                   else (dmin, dmax))
 with c4:
     include_fms = st.checkbox("纳入 FMS 筛查结果", value=True)
-    st.caption("FMS 的 0~3 原始分不进入 0~100 得分体系，仅用于风险、疼痛与左右不对称的原因分析。")
+    st.caption("FMS 的 0～3 原始分不进入 0～100 得分体系，仅用于风险、疼痛与左右不对称的原因分析。")
 
 if start and end and start > end:
     st.error("开始日期不能晚于结束日期，请重新选择统计区间。")
@@ -108,7 +108,7 @@ except Exception as exc:
 
 # ------------------------------------------------------------------ ② 概览
 st.markdown("---")
-st.subheader("② 概览")
+cal_report_title("②", "概览")
 st.caption(f"报告对象：**{escape_html(report['scope'])}**　｜　模式：{mode}　｜　"
            f"统计区间：{report['period']}　｜　生成日期：{report['generated']}")
 st.caption(f"口径版本：系统 {report.get('app_version', '—')} ｜ "
@@ -137,7 +137,7 @@ if report["details"].empty:
             "下方结论会显示为数据不足提示。")
 
 # ------------------------------------------------------------------ ③ 不足项
-st.subheader("③ 不足项")
+cal_report_title("③", "不足项")
 gaps = report["gaps"]
 if gaps.empty:
     st.success("本次范围内未发现明显不足项（所有已评分项目的平均得分与达标率均在口径之上）。")
@@ -153,19 +153,17 @@ else:
                "命中运动项目关键能力域、严重度高的不足项优先排序。")
 
 # ------------------------------------------------------------------ ④ 原因分析
-st.subheader("④ 原因分析")
+cal_report_title("④", "原因分析")
 for i, text in enumerate(report["reasons"], start=1):
     st.markdown(f"**{i}.** {text}")
 
 # ------------------------------------------------------------------ ⑤ 改善建议
-st.subheader("⑤ 下一步改善建议")
+cal_report_title("⑤", "下一步改善建议")
 for item in report["advice"]:
-    box = (st.error if item["优先级"] == "P0"
-           else st.warning if item["优先级"] == "P1" else st.info)
-    box(f"**[{item['优先级']}] {item['针对']}**  \n{item['建议']}")
+    cal_advice(item["优先级"], item["针对"], item["建议"])
 
 # ------------------------------------------------------------------ 汇总与明细
-st.subheader("⑥ 支撑数据")
+cal_report_title("⑥", "支撑数据")
 with st.expander("按能力域汇总（图表与表格）", expanded=False):
     cat = report["category_stats"]
     if cat.empty:
@@ -173,8 +171,9 @@ with st.expander("按能力域汇总（图表与表格）", expanded=False):
     else:
         fig = px.bar(cat, x="类别", y="平均得分", range_y=[0, 100],
                      labels={"平均得分": "平均得分", "类别": "能力域"},
-                     title="各能力域平均得分（0~100，虚线为 60 分达标线）")
-        fig.add_hline(y=PASS_LINE, line_dash="dash", line_color="#e08b2c")
+                     title="各能力域平均得分（0～100，虚线 PASS 60）")
+        fig.add_hline(y=PASS_LINE, line_dash="dash", line_color="#E08B2C",
+                      annotation_text="PASS 60")
         st.plotly_chart(plotly_font(fig), width="stretch")
         cat_shown = cat.copy()
         cat_shown["平均得分"] = cat_shown["平均得分"].round(1)
@@ -188,12 +187,12 @@ if include_fms and not report["fms"].empty:
     with st.expander(f"FMS 筛查明细（{len(fms_shown)} 次）", expanded=False):
         st.dataframe(fms_shown, hide_index=True, width="stretch")
 
-st.subheader("⑦ 数据局限与说明")
+cal_report_title("⑦", "数据局限与说明")
 for caveat in report["caveats"]:
     st.caption("• " + caveat)
 
 # ------------------------------------------------------------------ ⑧ 导出
-st.subheader("⑧ 导出报告")
+cal_report_title("⑧", "导出报告")
 safe_scope = re.sub(r'[\\/:*?"<>|\s（）·]+', "_", report["scope"])
 stamp = report["generated"].replace("-", "")
 

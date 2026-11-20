@@ -15,10 +15,10 @@ from utils import (
 st.set_page_config(page_title="数据分析", page_icon="📊", layout="wide")
 inject_css()
 ensure_files()
-page_header("数据分析", "体能分析看 0~100 分进步曲线，FMS 分析看 0~21 分功能风险", "📊")
+page_header("数据分析", "体能分析看 0～100 分进步曲线，FMS 分析看 0～21 分功能风险", "📊")
 render_sidebar()
-st.caption(f"评分标准：{STANDARDS_DISCLAIMER}。FMS 的 0~3 原始分绝不进入平均体能得分、"
-           "达标率或 0~100 坐标轴。")
+st.caption(f"评分标准：{STANDARDS_DISCLAIMER}。FMS 的 0～3 原始分绝不进入平均体能得分、"
+           "达标率或 0～100 坐标轴。")
 
 tests = load_tests()
 names = athlete_map()
@@ -71,8 +71,10 @@ with tab_physical:
                           range_y=[0, 100],
                           labels={"得分": "得分", "测试日期": "测试日期"},
                           title=f"{trend_item} · 得分趋势（单位 {unit}，达标 60 分）")
-            fig.add_hline(y=60, line_dash="dash", line_color="#e08b2c")
-            fig.add_hline(y=90, line_dash="dot", line_color="#18a58b")
+            fig.add_hline(y=60, line_dash="dash", line_color="#E08B2C",
+                          annotation_text="PASS 60")
+            fig.add_hline(y=90, line_dash="dot", line_color="#18A58B",
+                          annotation_text="EXCELLENT 90")
             fig.update_traces(line_width=2.5, marker_size=8)
             # 数据集中在同一天时，Plotly 默认会生成带毫秒的刻度，这里固定日期格式。
             fig.update_xaxes(type="date", tickformat="%Y-%m-%d", nticks=8)
@@ -84,11 +86,12 @@ with tab_physical:
             latest = data.sort_values("测试日期").groupby(["姓名", "测试项目"], as_index=False).tail(1)
             fig2 = px.bar(latest, x="测试项目", y="得分", color="姓名", barmode="group",
                           range_y=[0, 100], labels={"得分": "最新得分"})
-            fig2.add_hline(y=60, line_dash="dash", line_color="#e08b2c")
+            fig2.add_hline(y=60, line_dash="dash", line_color="#E08B2C",
+                           annotation_text="PASS 60")
             st.plotly_chart(plotly_font(fig2), width="stretch")
 
         with right:
-            st.subheader("能力雷达图（0~100）")
+            st.subheader("能力雷达图（0～100）")
             radar_person = st.selectbox("选择运动员", options=sorted(data["姓名"].unique()))
             items = sorted(data["测试项目"].unique())
             one = data[data["姓名"] == radar_person].groupby("测试项目")["得分"].mean()
@@ -110,8 +113,8 @@ with tab_physical:
             counts.columns = ["等级", "记录数"]
             fig4 = px.pie(counts, values="记录数", names="等级", hole=0.45,
                           color="等级",
-                          color_discrete_map={"优秀": "#18a58b", "良好": "#1e5b98",
-                                              "达标": "#7fb2df", "待提升": "#e08b2c"})
+                          color_discrete_map={"优秀": "#18A58B", "良好": "#2E6BD6",
+                                              "达标": "#9DBCE8", "待提升": "#E08B2C"})
             st.plotly_chart(plotly_font(fig4), width="stretch")
         with c2:
             st.subheader("筛选后的明细数据")
@@ -145,17 +148,17 @@ with tab_fms:
 
         fl, fr = st.columns([1.35, 1])
         with fl:
-            st.subheader("FMS 总分分布（0~21，风险线 14）")
+            st.subheader("FMS 总分分布（0～21，风险线 14）")
             fig = px.bar(view, x="姓名", y="FMS总分", color="风险", barmode="group",
                          range_y=[0, 21],
-                         color_discrete_map={"一般": "#1e5b98", "较高风险": "#d9534f"},
+                         color_discrete_map={"一般": "#2E6BD6", "较高风险": "#D9534F"},
                          labels={"FMS总分": "FMS 总分"})
-            fig.add_hline(y=FMS_RISK_LINE, line_dash="dash", line_color="#d9534f",
-                          annotation_text="风险线 14 分")
+            fig.add_hline(y=FMS_RISK_LINE, line_dash="dash", line_color="#D9534F",
+                          annotation_text="FMS RISK 14")
             st.plotly_chart(plotly_font(fig), width="stretch")
 
         with fr:
-            st.subheader("各动作平均原始分（0~3）")
+            st.subheader("各动作平均原始分（0～3）")
             fms_rows = tests[tests["测试类别"] == "FMS"]
             detail = []
             for _, g in fms_rows.groupby(["运动员ID", "测试日期"], dropna=False):
@@ -168,8 +171,8 @@ with tab_fms:
                 mov = (pd.DataFrame(detail).groupby("动作", as_index=False)["原始分"].mean()
                        .sort_values("原始分"))
                 fig2 = px.bar(mov, x="原始分", y="动作", orientation="h", range_x=[0, 3],
-                              labels={"原始分": "平均原始分（0~3）"},
-                              color_discrete_sequence=["#18a58b"])
+                              labels={"原始分": "平均原始分（0～3）"},
+                              color_discrete_sequence=["#18A58B"])
                 st.plotly_chart(plotly_font(fig2), width="stretch")
             else:
                 st.caption("暂无动作原始分。")

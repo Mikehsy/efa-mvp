@@ -1,5 +1,5 @@
 """页面 1：运动员档案的增删改查（按当前日期实时展示适用标准组）。"""
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import streamlit as st
@@ -26,9 +26,19 @@ with tab_add:
     with g1:
         gender = st.selectbox("性别", ["男", "女"], key="add_gender")
     with g2:
-        birth = st.date_input("出生日期", value=date(2002, 1, 1),
-                              min_value=date(1950, 1, 1), max_value=date.today(),
-                              key="add_birth")
+        manual = st.checkbox("手动输入出生日期（可选更早年份）", key="add_birth_manual")
+        if manual:
+            birth_text = st.text_input("出生日期（YYYY-MM-DD）", value="2002-01-01",
+                                       key="add_birth_text")
+            try:
+                birth = datetime.strptime(birth_text.strip(), "%Y-%m-%d").date()
+            except (ValueError, AttributeError):
+                birth = date(2002, 1, 1)
+                st.caption("日期格式无效，按 2002-01-01 处理。")
+        else:
+            birth = st.date_input("出生日期", value=date(2002, 1, 1),
+                                  min_value=date(1900, 1, 1), max_value=date.today(),
+                                  key="add_birth")
     age = calc_age(birth, date.today())
     group = standard_group(gender, birth, date.today())
     label = AGE_GROUP_LABEL.get(group.split("|")[-1], "")
@@ -131,7 +141,8 @@ with tab_list:
                 e3, e4, e5 = st.columns(3)
                 with e3:
                     new_birth = st.date_input("出生日期",
-                                              value=b.date() if not pd.isna(b) else date(2002, 1, 1))
+                                              value=b.date() if not pd.isna(b) else date(2002, 1, 1),
+                                              min_value=date(1900, 1, 1), max_value=date.today())
                 with e4:
                     new_team = st.text_input("所属队伍", value=str(row["所属队伍"]))
                 with e5:

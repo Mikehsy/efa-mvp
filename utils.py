@@ -7,8 +7,9 @@
 * tests.csv：原 7 列之后追加「测试类别、评分类型、侧别、标准组、测试时年龄、疼痛标记、运动项目」。
   其中「运动项目」与「标准组」同为写入时快照，不随档案修改而漂移。
   得分 / 等级 / FMS总分 / 不对称标记 / 结果说明 / 结果显示 均为派生量，不落盘。
-* standards.csv：测试项目,性别,年龄组,达标线,优秀线,单位,方向,类别,评分类型,是否评分。
-  由 27 个 continuous 评分项 × 2 性别 × 5 年龄组 = 270 行程序生成，界面可编辑。
+* standards.csv：测试项目,性别,年龄组,低限线,达标线,优秀线,单位,方向,类别,评分类型,是否评分。
+  由 27 个 continuous 评分项 × 2 性别 × 4 年龄组 = 216 行程序生成，界面可编辑。
+  计分为三段式：低限线 0 分、达标线 60 分、优秀线 100 分；旧 10 列表在读取时自动补低限线。
 * 所有测试数据都通过「运动项目」快照与对应运动项目关联；load_table() 对缺列一律补空，
   可直接读取旧格式备份文件，迁移时按运动员档案回填快照。
 """
@@ -46,8 +47,63 @@ logger = get_logger()
 ATHLETE_COLS =["运动员ID", "姓名", "性别", "出生日期", "所属队伍", "专项", "备注", "运动项目"]
 TEST_COLS = ["记录ID", "运动员ID", "测试日期", "测试项目", "成绩", "单位", "备注",
              "测试类别", "评分类型", "侧别", "标准组", "测试时年龄", "疼痛标记", "运动项目"]
-STANDARD_COLS = ["测试项目", "性别", "年龄组", "达标线", "优秀线", "单位", "方向",
+STANDARD_COLS = ["测试项目", "性别", "年龄组", "低限线", "达标线", "优秀线", "单位", "方向",
                  "类别", "评分类型", "是否评分"]
+
+LOW_SCORE = 0.0
+PASS_SCORE = 60.0
+EXCELLENT_SCORE = 100.0
+
+
+def derive_low_line(pass_line, excellent_line, direction: str) -> float:
+    """由达标线/优秀线推导 0 分低限线。
+
+    默认取与「达标线→优秀线」等长的一段；对非负指标把低限线截到 0。
+    这样旧标准表即使没有低限线，也能在内存中无缝兼容。
+    """
+    p = float(pass_line)
+    e = float(excellent_line)
+    span = abs(e - p)
+    if str(direction) == "越小越好":
+        low = p + span
+    else:
+        low = max(0.0, p - span)
+    return round(low, 2)
+
+
+def _valid_three_lines(low, pass_line, excellent_line, direction: str) -> bool:
+    """三条线必须严格有序，且低限线在较差方向。"""
+    if low is None or pass_line is None or excellent_line is None:
+        return False
+    if pd.isna(low) or pd.isna(pass_line) or pd.isna(excellent_line):
+        return False
+    low, p, e = float(low), float(pass_line), float(excellent_line)
+    if str(direction) == "越小越好":
+        return low > p > e
+    return low < p < e
+
+
+def _score_from_three_lines(value: float, low: float, pass_line: float,
+                            excellent_line: float, direction: str) -> float:
+    """三段式线性计分：低限 0、达标 60、优秀 100。"""
+    v = float(value)
+    if str(direction) == "越小越好":
+        if v >= low:
+            return LOW_SCORE
+        if v > pass_line:
+            return round((low - v) / (low - pass_line) * PASS_SCORE, 1)
+        if v > excellent_line:
+            return round(PASS_SCORE + (pass_line - v) / (pass_line - excellent_line)
+                         * (EXCELLENT_SCORE - PASS_SCORE), 1)
+        return EXCELLENT_SCORE
+    if v <= low:
+        return LOW_SCORE
+    if v < pass_line:
+        return round((v - low) / (pass_line - low) * PASS_SCORE, 1)
+    if v < excellent_line:
+        return round(PASS_SCORE + (v - pass_line) / (excellent_line - pass_line)
+                     * (EXCELLENT_SCORE - PASS_SCORE), 1)
+    return EXCELLENT_SCORE
 
 TABLES = {
     "athlete": (ATHLETE_FILE, ATHLETE_COLS, "运动员ID"),
@@ -128,10 +184,11 @@ def _kind_from_path(path) -> str:
             "standards.csv": "standards"}.get(name, name)
 
 GENDERS = ["男", "女"]
-AGE_GROUPS = ["U16", "U18", "U20", "成年", "大师"]
+# 用户确认：取消大师组，35 岁及以上并入成年组。年龄组由 5 组缩减为 4 组。
+AGE_GROUPS = ["U16", "U18", "U20", "成年"]
 AGE_GROUP_LABEL = {
     "U16": "U16（<16 岁）", "U18": "U18（16-17 岁）", "U20": "U20（18-19 岁）",
-    "成年": "成年（20-34 岁）", "大师": "大师（>=35 岁）",
+    "成年": "成年（>=20 岁，含原大师组）",
 }
 FMS_RISK_LINE = 14
 STANDARDS_DISCLAIMER = "非专业常模，请按本队实测替换"
@@ -181,7 +238,7 @@ DESCRIPTIVE_ITEMS = {
     "腰臀比": {"unit": "", "category": "身体形态"},
 }
 
-# FMS 完整版：7 动作（0~3 分）、5 个双侧动作、3 项排除性测试。
+# FMS 完整版：7 动作（0～3 分）、5 个双侧动作、3 项排除性测试。
 # (名称, 是否双侧, 关联的排除性测试)
 FMS_MOVEMENTS = [
     ("FMS深蹲", False, ""),
@@ -200,12 +257,11 @@ FMS_CLEARING = {
 FMS_BILATERAL = {name for name, bilateral, _ in FMS_MOVEMENTS if bilateral}
 
 # 示例常模缩放系数：以「成年男」为 1.00，其余按年龄组 / 性别缩放。
-AGE_FACTOR = {"U16": 0.80, "U18": 0.92, "U20": 0.98, "成年": 1.00, "大师": 0.88}
+AGE_FACTOR = {"U16": 0.80, "U18": 0.92, "U20": 0.98, "成年": 1.00}
 GENDER_FACTOR = {"男": 1.00, "女": 0.88}
 # 示意性留白：这些组合默认不评分，用于演示「待配置清单」与「—」。
 UNCONFIGURED = {
     "U16": {"深蹲1RM", "卧推1RM", "硬拉1RM"},
-    "大师": {"100米冲刺", "Yo-Yo间歇跑", "3000米跑", "最大摄氧量", "药球前抛", "硬拉1RM"},
 }
 
 # ---------------------------------------------------------------- 运动项目
@@ -396,9 +452,8 @@ def age_group(age) -> str:
         return "U18"
     if age < 20:
         return "U20"
-    if age < 35:
-        return "成年"
-    return "大师"
+    # 用户确认取消大师组：35 岁及以上并入成年组。
+    return "成年"
 
 
 def group_by_age(gender: str, age) -> str:
@@ -420,6 +475,14 @@ def ensure_files() -> None:
     """
     uid = _db_user_id()
     if uid is not None:
+        # 每个会话/每个用户只初始化一次，避免每次读表都多一次跨网络查询。
+        flag = "_efa_db_ready"
+        try:
+            ready = st.session_state.get(flag)
+        except Exception:
+            ready = None
+        if ready == uid:
+            return
         import db
         db.init_db()
         if not db.has_data(uid):
@@ -428,6 +491,12 @@ def ensure_files() -> None:
             std = generate_default_standards()
             db.save_frame(uid, "standards",
                           std[STANDARD_COLS].to_dict(orient="records"), STANDARD_COLS)
+        for k in ("athlete", "test", "standards"):
+            _invalidate_frame(uid, k)
+        try:
+            st.session_state[flag] = uid
+        except Exception:
+            pass
         return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     for path, cols in ((ATHLETE_FILE, ATHLETE_COLS), (TEST_FILE, TEST_COLS)):
@@ -437,10 +506,39 @@ def ensure_files() -> None:
         atomic_write_csv(generate_default_standards(), STANDARD_FILE, snapshot=False)
     migrate_legacy_athletes()
     migrate_legacy_tests()
+    migrate_master_group()
+
+
+def migrate_master_group() -> None:
+    """一次性迁移：取消大师组后，把历史标准组快照「男|大师」「女|大师」改为成年。
+
+    只在本地 CSV 模式生效；DB 模式的数据由运营方按文档指引迁移。
+    幂等：无大师快照时不写文件。
+    """
+    try:
+        raw = pd.read_csv(TEST_FILE, encoding="utf-8-sig", dtype=str)
+    except Exception:
+        return
+    if raw.empty or "标准组" not in raw.columns:
+        return
+    mask = raw["标准组"].fillna("").astype(str).str.endswith("|大师")
+    if not mask.any():
+        return
+    n = int(mask.sum())
+    raw.loc[mask, "标准组"] = raw.loc[mask, "标准组"].astype(str).str.replace(
+        r"\|大师$", "|成年", regex=True)
+    atomic_write_csv(raw[TEST_COLS] if all(c in raw.columns for c in TEST_COLS) else raw,
+                     TEST_FILE)
+    audit("migrate_master_group", target=TEST_FILE.name, rows=n)
 
 
 def generate_default_standards() -> pd.DataFrame:
-    """程序生成 27 项 × 2 性别 × 5 年龄组 = 270 行内置示意性示例常模。"""
+    """生成 27 项 × 2 性别 × 4 年龄组 = 216 行内置常模。
+
+    底座为示例常模；已确认有出处的组合由 confirmed_standards.CONFIRMED 覆盖。
+    来源出处在 docs/ 与 confirmed_standards.py 中追溯；新增低限线后为 11 列结构。
+    """
+    import confirmed_standards
     rows = []
     for item, s in CONTINUOUS_ITEMS.items():
         for gender in GENDERS:
@@ -451,8 +549,14 @@ def generate_default_standards() -> pd.DataFrame:
                 else:
                     pass_line, excellent_line = s["pass"] * factor, s["excellent"] * factor
                 configured = item not in UNCONFIGURED.get(ag, set())
+                hit = confirmed_standards.lookup(item, gender, ag)
+                if hit:
+                    pass_line, excellent_line = hit[0], hit[1]
+                    configured = True
+                low_line = derive_low_line(pass_line, excellent_line, s["direction"])
                 rows.append({
                     "测试项目": item, "性别": gender, "年龄组": ag,
+                    "低限线": round(low_line, 2) if configured else "",
                     "达标线": round(pass_line, 2) if configured else "",
                     "优秀线": round(excellent_line, 2) if configured else "",
                     "单位": s["unit"], "方向": s["direction"], "类别": s["category"],
@@ -596,7 +700,7 @@ def validate_date(value, *, allow_future_days: int = 1) -> str:
 
 
 def validate_score(value, kind: str) -> float | None:
-    """校验成绩：数值有限；ordinal 必须在 0~3；binary 不做数值校验。"""
+    """校验成绩：数值有限；ordinal 必须在 0～3；binary 不做数值校验。"""
     if _clean(kind) == "binary":
         return None
     num = pd.to_numeric(value, errors="coerce")
@@ -606,7 +710,7 @@ def validate_score(value, kind: str) -> float | None:
     if not math.isfinite(num):
         raise ValidationError("成绩不能是无穷大或非数值。")
     if _clean(kind) == "ordinal" and not 0 <= num <= 3:
-        raise ValidationError("FMS 动作得分必须在 0~3 之间。")
+        raise ValidationError("FMS 动作得分必须在 0～3 之间。")
     return num
 
 
@@ -830,6 +934,29 @@ def restore_backup(folder) -> int:
     return len(DATA_FILES)
 
 
+# DB 模式读表缓存：一次页面渲染里同一张表常被读多次（侧栏、首页、卡片），
+# 每次都跨洋查库会让每次交互都变慢。按 (用户ID, 表类型) 缓存，短 TTL 兜底，
+# 写入时立即失效，避免看到旧数据或跨用户串数据。
+_FRAME_CACHE = {}
+_FRAME_CACHE_TTL = 5.0
+
+
+def _load_frame(uid, kind: str):
+    import db
+    key = (str(uid), kind)
+    now = time.monotonic()
+    hit = _FRAME_CACHE.get(key)
+    if hit and now - hit[0] < _FRAME_CACHE_TTL:
+        return hit[1], hit[2]
+    records, saved_cols = db.load_frame(uid, kind)
+    _FRAME_CACHE[key] = (now, records, saved_cols)
+    return records, saved_cols
+
+
+def _invalidate_frame(uid, kind: str) -> None:
+    _FRAME_CACHE.pop((str(uid), kind), None)
+
+
 def load_table(path: Path, cols: list[str]) -> pd.DataFrame:
     """读取表格；缺列自动补空；损坏文件给出恢复指引并返回空表，不白屏。
 
@@ -838,8 +965,7 @@ def load_table(path: Path, cols: list[str]) -> pd.DataFrame:
     ensure_files()
     uid = _db_user_id()
     if uid is not None:
-        import db
-        records, saved_cols = db.load_frame(uid, _kind_from_path(path))
+        records, saved_cols = _load_frame(uid, _kind_from_path(path))
         if records is None:
             return pd.DataFrame(columns=cols).fillna("")
         df = pd.DataFrame(records)
@@ -875,8 +1001,9 @@ def save_table(df: pd.DataFrame, path: Path, cols: list[str]) -> None:
     uid = _db_user_id()
     if uid is not None:
         import db
-        db.save_frame(uid, _kind_from_path(path),
-                      out.to_dict(orient="records"), list(cols))
+        kind = _kind_from_path(path)
+        db.save_frame(uid, kind, out.to_dict(orient="records"), list(cols))
+        _invalidate_frame(uid, kind)
         return
     atomic_write_csv(out, path)
 
@@ -915,8 +1042,30 @@ def _fill_sport(rows: list[dict]) -> list[dict]:
 
 def load_standards() -> pd.DataFrame:
     df = load_table(STANDARD_FILE, STANDARD_COLS)
-    for c in ("达标线", "优秀线"):
+    if "低限线" not in df.columns:
+        df["低限线"] = ""
+    for c in ("低限线", "达标线", "优秀线"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    # 已确认常模在读取时覆盖：云端/本地既有标准表不必重建即可生效。
+    # 只覆盖 confirmed_standards.CONFIRMED 命中的组合，其余（含手工修改）保持不动。
+    try:
+        import confirmed_standards
+        for (item, gender, ag), (p_line, e_line, _src) in confirmed_standards.CONFIRMED.items():
+            mask = ((df["测试项目"] == item) & (df["性别"] == gender)
+                    & (df["年龄组"] == ag))
+            if mask.any():
+                df.loc[mask, "达标线"] = p_line
+                df.loc[mask, "优秀线"] = e_line
+                df.loc[mask, "是否评分"] = "是"
+    except ImportError:
+        pass
+    # 三段式兼容：旧表无低限线或低限线顺序错误时，按达标/优秀线内存推导。
+    for idx, row in df.iterrows():
+        p, e, low = row.get("达标线"), row.get("优秀线"), row.get("低限线")
+        direction = str(row.get("方向") or "越大越好")
+        if pd.notna(p) and pd.notna(e) and float(p) != float(e):
+            if not _valid_three_lines(low, p, e, direction):
+                df.at[idx, "低限线"] = derive_low_line(p, e, direction)
     return df
 
 
@@ -1066,27 +1215,28 @@ def lookup_standard(std: pd.DataFrame, item: str, group: str) -> dict | None:
     p, e = r.get("达标线"), r.get("优秀线")
     if p is None or e is None or pd.isna(p) or pd.isna(e) or float(p) == float(e):
         return None
-    return {"pass": float(p), "excellent": float(e),
-            "direction": _clean(r.get("方向")) or "越大越好",
-            "unit": _clean(r.get("单位"))}
+    direction = _clean(r.get("方向")) or "越大越好"
+    low = r.get("低限线") if "低限线" in r else None
+    if not _valid_three_lines(low, p, e, direction):
+        low = derive_low_line(p, e, direction)
+    return {"low": float(low), "pass": float(p), "excellent": float(e),
+            "direction": direction, "unit": _clean(r.get("单位"))}
 
 
 def calc_score(item: str, value, group: str, std: pd.DataFrame | None = None) -> float | None:
-    """评分器按「评分类型」分派：仅 continuous 线性换算 0~100 分。
+    """评分器按「评分类型」分派：仅 continuous 做三段式 0～100 分换算。
 
-    ordinal（FMS 0~3）、binary（排除性测试）、descriptive（身高/体重/BMI）
-    均返回 None —— 绝不进入平均体能得分、达标率或 0~100 坐标轴。
+    低限线=0 分、达标线=60 分、优秀线=100 分；超出区间按 0 / 100 封顶。
+    ordinal（FMS 0～3）、binary（排除性测试）、descriptive（身高/体重/BMI）
+    均返回 None —— 绝不进入平均体能得分、达标率或 0～100 坐标轴。
     """
     if value is None or pd.isna(value):
         return None
     s = lookup_standard(load_standards() if std is None else std, item, group)
     if s is None:
         return None
-    p, e = float(value), s["pass"]
-    ratio = ((s["pass"] - p) / (s["pass"] - s["excellent"])
-             if s["direction"] == "越小越好"
-             else (p - s["pass"]) / (s["excellent"] - s["pass"]))
-    return round(max(0.0, min(100.0, 60 + ratio * 40)), 1)
+    return _score_from_three_lines(float(value), s["low"], s["pass"],
+                                   s["excellent"], s["direction"])
 
 
 def is_positive(row) -> bool:
@@ -1113,7 +1263,7 @@ def result_display(row) -> str:
 
 
 def physical_scores(df: pd.DataFrame) -> pd.DataFrame:
-    """只保留 continuous 且已评分的记录（FMS 永不被计入 0~100 体系）。"""
+    """只保留 continuous 且已评分的记录（FMS 永不被计入 0～100 体系）。"""
     if df.empty:
         return df
     return df[(df["评分类型"] == "continuous")
@@ -1124,6 +1274,11 @@ def load_tests() -> pd.DataFrame:
     """读取测试记录并派生全部得分 / 等级 / FMS 汇总字段（均不落盘）。"""
     df = load_table(TEST_FILE, TEST_COLS)
     df["运动员ID"] = df["运动员ID"].astype(str).str.strip()
+    # 取消大师组后的即时兼容：历史快照里残留的「|大师」在内存中映射为「|成年」，
+    # 使旧记录仍能命中 4 组标准；不修改底层数据。
+    if "标准组" in df.columns:
+        df["标准组"] = df["标准组"].astype(str).str.replace(
+            r"\|大师$", "|成年", regex=True)
     df["测试日期"] = pd.to_datetime(df["测试日期"], errors="coerce")
     df["成绩数值"] = pd.to_numeric(df["成绩"], errors="coerce").astype(float)
     if df.empty:
@@ -1168,33 +1323,57 @@ def load_tests() -> pd.DataFrame:
                         ("单位", units), ("运动项目", sports)):
         df[col] = values
 
-    # 得分 / 等级 / 结果显示：一次性构建常模查表后向量化，避免逐行过滤 270 行标准表。
+    # 得分 / 等级 / 结果显示：一次性构建常模查表后向量化，避免逐行过滤 216 行标准表。
     usable = std[(std["是否评分"].astype(str) == "是")
                  & (std["评分类型"].astype(str) == "continuous")].copy()
-    usable["达标线"] = pd.to_numeric(usable["达标线"], errors="coerce")
-    usable["优秀线"] = pd.to_numeric(usable["优秀线"], errors="coerce")
+    if "低限线" not in usable.columns:
+        usable["低限线"] = float("nan")
+    for c in ("低限线", "达标线", "优秀线"):
+        usable[c] = pd.to_numeric(usable[c], errors="coerce")
     usable = usable.dropna(subset=["达标线", "优秀线"])
     usable = usable[usable["达标线"] != usable["优秀线"]]
-    std_map = {
-        (str(item), f"{gender}|{ag}"): (float(p_line), float(e_line), str(direction))
-        for item, gender, ag, p_line, e_line, direction in zip(
+    std_map = {}
+    for item, gender, ag, low_line, p_line, e_line, direction in zip(
             usable["测试项目"], usable["性别"], usable["年龄组"],
-            usable["达标线"], usable["优秀线"], usable["方向"])
-    }
+            usable["低限线"], usable["达标线"], usable["优秀线"], usable["方向"]):
+        direction = str(direction)
+        if not _valid_three_lines(low_line, p_line, e_line, direction):
+            low_line = derive_low_line(p_line, e_line, direction)
+        std_map[(str(item), f"{gender}|{ag}")] = (
+            float(low_line), float(p_line), float(e_line), direction)
     params = [std_map.get((item, group))
               for item, group in zip(df["测试项目"].astype(str), df["标准组"].astype(str))]
-    pass_line = pd.Series([x[0] if x else float("nan") for x in params],
-                          index=df.index, dtype=float)
-    exc_line = pd.Series([x[1] if x else float("nan") for x in params],
+    low_line = pd.Series([x[0] if x else float("nan") for x in params],
                          index=df.index, dtype=float)
-    smaller = pd.Series([bool(x and x[2] == "越小越好") for x in params],
+    pass_line = pd.Series([x[1] if x else float("nan") for x in params],
+                          index=df.index, dtype=float)
+    exc_line = pd.Series([x[2] if x else float("nan") for x in params],
+                         index=df.index, dtype=float)
+    smaller = pd.Series([bool(x and x[3] == "越小越好") for x in params],
                         index=df.index, dtype=bool)
     value = df["成绩数值"]
-    denom_big = (exc_line - pass_line).replace(0, float("nan"))
-    denom_small = (pass_line - exc_line).replace(0, float("nan"))
-    ratio = ((value - pass_line) / denom_big).where(
-        ~smaller, (pass_line - value) / denom_small)
-    score = (60 + ratio * 40).clip(0, 100).round(1)
+    den_low_big = (pass_line - low_line).replace(0, float("nan"))
+    den_big = (exc_line - pass_line).replace(0, float("nan"))
+    den_low_small = (low_line - pass_line).replace(0, float("nan"))
+    den_small = (pass_line - exc_line).replace(0, float("nan"))
+    score = pd.Series(float("nan"), index=df.index, dtype=float)
+    big = ~smaller
+    score = score.mask(big & value.le(low_line), LOW_SCORE)
+    score = score.mask(big & value.gt(low_line) & value.lt(pass_line),
+                       (value - low_line) / den_low_big * PASS_SCORE)
+    score = score.mask(big & value.ge(pass_line) & value.lt(exc_line),
+                       PASS_SCORE + (value - pass_line) / den_big
+                       * (EXCELLENT_SCORE - PASS_SCORE))
+    score = score.mask(big & value.ge(exc_line), EXCELLENT_SCORE)
+    score = score.mask(smaller & value.ge(low_line), LOW_SCORE)
+    score = score.mask(smaller & value.lt(low_line) & value.gt(pass_line),
+                       (low_line - value) / den_low_small * PASS_SCORE)
+    score = score.mask(smaller & value.le(pass_line) & value.gt(exc_line),
+                       PASS_SCORE + (pass_line - value) / den_small
+                       * (EXCELLENT_SCORE - PASS_SCORE))
+    score = score.mask(smaller & value.le(exc_line), EXCELLENT_SCORE)
+    # 三段式：低限线 0 分、达标线 60 分、优秀线 100 分（与 calc_score 保持一致）。
+    score = score.clip(0, 100).round(1)
     score = score.where((df["评分类型"] == "continuous") & score.notna(), float("nan"))
     df["得分"] = score
     df["等级"] = (pd.cut(score, bins=[float("-inf"), 60, 75, 90, float("inf")],
@@ -1243,7 +1422,7 @@ def load_tests() -> pd.DataFrame:
 
 
 def fms_sessions(tests: pd.DataFrame | None = None) -> pd.DataFrame:
-    """按 (运动员ID, 测试日期) 汇总一次 FMS 筛查：0~21 总分、风险、疼痛、左右不对称。"""
+    """按 (运动员ID, 测试日期) 汇总一次 FMS 筛查：0～21 总分、风险、疼痛、左右不对称。"""
     cols = ["运动员ID", "姓名", "测试日期", "FMS总分", "风险", "含疼痛", "疼痛警示",
             "结果说明", "不对称清单", "动作完整数", "各动作得分"]
     if tests is None:
@@ -1503,8 +1682,9 @@ def require_access_gate() -> None:
     import os
 
     if st.session_state.get("efa_user") or st.session_state.get("_efa_user"):
-        # DB 模式下每次 rerun 确保当前用户数据已初始化。
+        # 顺序不可颠倒：同意失效时不得再初始化/写入任何业务数据。
         if db_mode_enabled():
+            _privacy_gate()
             ensure_files()
         _render_user_badge()
         return
@@ -1527,8 +1707,13 @@ def require_access_gate() -> None:
         pw = (os.environ.get("EFA_ACCESS_PASSWORD") or "").strip()
         if not pw:
             return
-        st.title("🔐 访问验证")
-        st.info("本系统包含运动员个人体能数据，请输入访问口令后进入。")
+        st.markdown(
+            '<div class="hero"><span class="cal-index">00 / ACCESS</span>'
+            '<span class="tag">运动员体能与功能评估系统</span>'
+            '<h1>访问验证</h1>'
+            '<p>本系统包含运动员个人体能数据，请输入访问口令后进入。</p></div>',
+            unsafe_allow_html=True,
+        )
         with st.form("efa_pw_gate"):
             val = st.text_input("访问口令", type="password")
             if st.form_submit_button("进入系统", type="primary"):
@@ -1538,8 +1723,13 @@ def require_access_gate() -> None:
                 st.error("口令错误，请重试。")
         st.stop()
 
-    st.title("🔐 登录 · 运动员体能与功能评估系统")
-    st.caption("请选择账号登录。演示账号仅用于产品试用，正式版将接入数据库账户。")
+    st.markdown(
+        '<div class="hero"><span class="cal-index">00 / ACCESS</span>'
+        '<span class="tag">运动员体能与功能评估系统</span>'
+        '<h1>登录</h1>'
+        '<p>请选择账号登录。演示账号仅用于产品试用，正式版将接入数据库账户。</p></div>',
+        unsafe_allow_html=True,
+    )
     with st.form("efa_login_gate"):
         col1, col2 = st.columns(2)
         with col1:
@@ -1560,12 +1750,18 @@ def require_access_gate() -> None:
 
 
 def _db_auth_gate() -> None:
-    """数据库模式：用户自助注册 / 登录。"""
+    """数据库模式：用户自助注册 / 登录（注册须取得 PIPL 知情同意）。"""
     import auth
     import db as _db
+    import privacy
     _db.init_db()
-    st.title("🔐 运动员体能与功能评估系统")
-    st.caption("免费试用版 · 注册后即可使用，数据按账号独立保存。")
+    st.markdown(
+        '<div class="hero"><span class="cal-index">00 / ACCESS</span>'
+        '<span class="tag">运动员体能与功能评估系统</span>'
+        '<h1>登录</h1>'
+        '<p>免费试用版 · 注册后即可使用，数据按账号独立保存。</p></div>',
+        unsafe_allow_html=True,
+    )
     tab_login, tab_reg = st.tabs(["登录", "注册新账号"])
     with tab_login:
         with st.form("db_login"):
@@ -1584,13 +1780,93 @@ def _db_auth_gate() -> None:
             em = st.text_input("邮箱（选填）", key="db_reg_e")
             np = st.text_input("密码（至少 6 位）", type="password", key="db_reg_p")
             cp = st.text_input("确认密码", type="password", key="db_reg_c")
+            st.markdown("**注册前请阅读并同意《隐私政策》**")
+            with st.expander(f"《隐私政策》全文（版本 {privacy.POLICY_VERSION}）"):
+                st.markdown(privacy.policy_text())
+            if not privacy.operator_configured():
+                st.warning("运营主体名称与个人信息保护负责人联系方式尚未配置，"
+                           "正式商用前必须由运营方填写真实信息。")
+            picked = [key for key, label, _ in privacy.CONSENT_ITEMS
+                      if st.checkbox(label, key=f"efa_reg_consent_{key}")]
             if st.form_submit_button("注册", type="primary"):
                 if np != cp:
                     st.error("两次输入的密码不一致。")
                 else:
-                    ok, msg = auth.register(nu, np, em)
+                    ok, msg = auth.register(nu, np, em, consents=picked,
+                                            policy_version=privacy.POLICY_VERSION)
                     (st.success(msg) if ok else st.error(msg))
     st.stop()
+
+
+def _privacy_gate() -> None:
+    """PIPL 闸口：未就现行政策取得有效同意时，只允许重新同意、删除数据或退出。
+
+    按 (用户, 政策版本) 缓存校验结果，避免每次 rerun 都查库（云端往返很贵）。
+    撤回同意、重新同意、注销后由调用方清除该缓存。
+    """
+    import auth
+    import db as _db
+    import privacy
+    u = st.session_state.get("efa_user") or {}
+    uid = u.get("id")
+    if not uid:
+        return
+    cache_key = (uid, privacy.POLICY_VERSION)
+    if st.session_state.get("_efa_consent_ok") == cache_key:
+        return
+    user = _db.get_user_by_id(uid)
+    if not user:
+        # 账号已被删除（例如另一个标签页完成注销），清理残留会话。
+        auth.sign_out(st)
+        st.rerun()
+        return
+    status = auth.consent_status(user)
+    if status == auth.CONSENT_OK:
+        st.session_state["_efa_consent_ok"] = cache_key
+        return
+    _render_reconsent(user, status)
+    st.stop()
+
+
+def _render_reconsent(user: dict | None, status: str) -> None:
+    """政策升级 / 历史账号 / 撤回同意后的唯一可达界面。"""
+    import auth
+    import privacy
+    reasons = {
+        auth.CONSENT_MISSING: "尚未取得你的有效同意（或此账号注册于合规功能上线之前）。",
+        auth.CONSENT_WITHDRAWN: "你已撤回同意，基于同意的数据处理已停止。",
+        auth.CONSENT_VERSION: "隐私政策已更新，需就新版本重新取得你的同意。",
+    }
+    st.title("🔒 隐私政策与重新同意")
+    st.warning(reasons.get(status, "需要重新确认同意后方可继续使用。"))
+    st.caption(f"当前政策版本：{privacy.POLICY_VERSION}　运营主体：{privacy.OPERATOR_NAME}")
+    with st.expander("阅读《隐私政策》全文", expanded=True):
+        st.markdown(privacy.policy_text())
+    if not privacy.operator_configured():
+        st.warning("运营主体名称与个人信息保护负责人联系方式尚未配置，"
+                   "正式商用前必须由运营方填写真实信息。")
+    with st.form("efa_reconsent"):
+        picked = [key for key, label, _ in privacy.CONSENT_ITEMS
+                  if st.checkbox(label, key=f"efa_reconsent_{key}")]
+        if st.form_submit_button("同意并继续使用", type="primary"):
+            ok, msg = auth.grant_consent(user["id"], picked)
+            if ok:
+                st.session_state.pop("_efa_consent_ok", None)
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+    st.markdown("---")
+    st.caption("不同意也可以直接删除账号与全部数据；删除后不可恢复。")
+    if st.checkbox("我不再使用本服务，要求删除账号及全部个人数据",
+                   key="efa_reconsent_delete_check"):
+        if st.button("确认删除账号与数据"):
+            auth.delete_account(user["id"])
+            auth.sign_out(st)
+            st.rerun()
+    if st.button("退出登录"):
+        auth.sign_out(st)
+        st.rerun()
 
 
 def _render_user_badge() -> None:
@@ -1606,98 +1882,422 @@ def _render_user_badge() -> None:
         st.rerun()
 
 
+# ---- CALIBER 判定徽标（v2 §10.4：浅底深字，颜色不单独承载语义）----
+_CAL_BADGE_COLORS = {
+    "EXCELLENT": ("#E6F5F1", "#0C5C4D"),
+    "PASS": ("#E8F0FB", "#1D4E9C"),
+    "WATCH": ("#FFF4E4", "#7A4A00"),
+    "FLAG": ("#FDECEB", "#A3211D"),
+    "RECORDED": ("#F0F4F7", "#41586B"),
+}
+
+
+def judge_score(value: float) -> str:
+    """把 0-100 分映射为 CALIBER 判定状态。"""
+    if value >= 90:
+        return "EXCELLENT"
+    if value >= 60:
+        return "PASS"
+    if value >= 40:
+        return "WATCH"
+    return "FLAG"
+
+
+_CAL_STATE_CN = {
+    "EXCELLENT": "优秀", "PASS": "达标", "WATCH": "待提升",
+    "FLAG": "风险", "RECORDED": "已记录",
+}
+
+
+def judgment_badge(state: str, text: str = "") -> str:
+    label = html.escape(text or f"{state} · {_CAL_STATE_CN.get(state, '')}".strip(" ·"))
+    bg, ink = _CAL_BADGE_COLORS.get(state, _CAL_BADGE_COLORS["RECORDED"])
+    return (f'<span class="cal-badge" style="background:{bg};color:{ink}" '
+            f'aria-label="判定：{label}">{label}</span>')
+
+
+def cal_section(index: str, title: str) -> None:
+    """带编号的区块标题，取代无编号的 st.subheader。"""
+    st.markdown(
+        f'<div class="cal-section"><span class="num">{html.escape(index)}</span>'
+        f'<h2>{html.escape(title)}</h2></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def cal_report_title(number: str, title: str) -> None:
+    """报告章节标题：大号编号 + 标题 + 延伸细线，用于 ①～⑧。"""
+    st.markdown(
+        f'<div class="cal-report-title"><span class="no">{html.escape(number)}</span>'
+        f'<h2>{html.escape(title)}</h2><span class="rule"></span></div>',
+        unsafe_allow_html=True,
+    )
+
+
+_ADVICE_TONES = {
+    "P0": ("#FDECEB", "#D9534F", "#A3211D", "FLAG"),
+    "P1": ("#FFF4E4", "#E08B2C", "#7A4A00", "WATCH"),
+    "P2": ("#E8F0FB", "#2E6BD6", "#1D4E9C", "PASS"),
+}
+
+
+def cal_advice(priority: str, target: str, advice: str) -> None:
+    """悬浮式改善建议卡；优先级只决定语义色，文字始终可见。"""
+    tone = _ADVICE_TONES.get(priority, _ADVICE_TONES["P2"])
+    bg, accent, ink, state = tone
+    st.markdown(
+        f'<div class="cal-advice" style="--adv-bg:{bg};--adv-accent:{accent};--adv-ink:{ink}">'
+        f'<div class="head">{judgment_badge(state, "[" + html.escape(priority) + "]")}'
+        f'<span class="title">{html.escape(target)}</span></div>'
+        f'<div class="body">{html.escape(advice)}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def cal_toast(message: str, kind: str = "ok") -> None:
+    """反馈条；kind 取 ok / warn / error，分别对应主色 / 橙 / 红左边框。"""
+    cls = "cal-toast" if kind == "ok" else f"cal-toast {html.escape(kind)}"
+    role = "alert" if kind == "error" else "status"
+    st.markdown(
+        f'<div class="{cls}" role="{role}">{html.escape(message)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def cal_skeleton_row(count: int = 4, height: int = 96) -> str:
+    """数据加载期间的骨架屏 HTML（4 列，移动端自动降为 2/1 列）。"""
+    cards = "".join(f'<div class="cal-skeleton" style="height:{height}px"></div>' for _ in range(count))
+    return (f'<div class="cal-skeleton-grid" style="--cols:{count}" '
+            f'aria-busy="true">{cards}</div>')
+
+
 def inject_css() -> None:
     install_error_hooks()
     st.markdown("""
     <style>
-        .main .block-container {padding-top: 1.8rem; max-width: 1400px;}
+        /* 兜底：半角 ~ 被 Markdown 误解析成删除线时不显示横线。
+           显示文本已统一用全角 ～，此规则防止任何遗漏页面再次出现划掉的文字。 */
+        del, s, strike {text-decoration: none !important;}
+        .main .block-container {padding-top:1.8rem; max-width:1440px; padding-left:32px; padding-right:32px;}
 
-        /* ---- 页头 hero：图标与标题同行对齐 ---- */
-        .hero {
-            background: linear-gradient(115deg, #12305c 0%, #1e5b98 55%, #18a58b 100%);
-            border-radius: 18px; padding: 24px 30px; color: #fff; margin-bottom: 22px;
-            box-shadow: 0 8px 24px rgba(18,48,92,.18);
+        /* ---- CALIBER 令牌与页头：编号 + 深墨蓝渐变 ---- */
+        :root {
+            --cal-depth:#0B1420; --cal-depth-2:#123A5C;
+            --cal-canvas:#F7F9FB; --cal-surface:#FFFFFF; --cal-surface-alt:#EEF3F7;
+            --cal-line:#DFE7EF; --cal-line-strong:#B9C9D6;
+            --cal-ink:#102336; --cal-ink-muted:#5B6F82;
+            --cal-primary:#18A58B; --cal-signal:#2E6BD6; --cal-focus:#0E7F9E;
+            --cal-watch:#E08B2C; --cal-risk:#D9534F;
         }
-        .hero .tag {display:inline-block; background:rgba(255,255,255,.18); border-radius:20px;
-                    padding:3px 12px; font-size:12px; margin-bottom:12px; letter-spacing:.5px;}
-        .hero h1 {display:flex; align-items:center; gap:10px; color:#fff; font-size:28px;
-                  margin:0 0 8px 0; letter-spacing:1px; line-height:1.2;}
-        .hero p {margin:0; opacity:.9; font-size:15px; line-height:1.6;}
+        .hero {
+            background:linear-gradient(115deg, #0B1420 0%, #123A5C 58%, #18A58B 145%);
+            border-radius:10px; padding:28px 32px; color:#fff; margin-bottom:24px;
+            box-shadow:0 12px 28px -12px rgba(11,20,32,.35);
+        }
+        .cal-index {display:block; font:500 10px/1.4 "IBM Plex Mono", ui-monospace, monospace;
+                    letter-spacing:.08em; color:rgba(255,255,255,.72); margin-bottom:10px;}
+        .hero .tag {display:inline-block; background:rgba(255,255,255,.12); border-radius:4px;
+                    padding:3px 10px; font-size:11px; margin-bottom:10px; letter-spacing:.06em;}
+        .hero h1 {color:#fff; font-size:28px; font-weight:300; letter-spacing:-.02em;
+                  margin:0 0 8px 0; line-height:1.18;}
+        .hero p {margin:0; opacity:.88; font-size:14px; line-height:1.55;}
 
         /* ---- 标题层级与分段 ---- */
-        h2 {font-size:19px; font-weight:600; color:#12305c; margin:24px 0 10px;
-            padding-left:10px; border-left:4px solid #1e5b98;}
-        h3 {font-size:16px; font-weight:600; color:#1e5b98; margin:16px 0 8px;}
-        .stMarkdown hr, [data-testid="stDivider"] {border:none; border-top:1px solid #e6ecf3; margin:18px 0;}
-        .stCaption, [data-testid="stCaption"] {color:#5b6b80; font-size:13px; line-height:1.7;}
+        h2 {font-size:19px; font-weight:400; color:var(--cal-ink); margin:26px 0 12px;
+            padding-left:12px; border-left:3px solid var(--cal-primary);}
+        h3 {font-size:16px; font-weight:500; color:var(--cal-ink); margin:18px 0 8px;}
+        .stMarkdown hr, [data-testid="stDivider"] {border:none; border-top:1px solid var(--cal-line); margin:20px 0;}
+        .stCaption, [data-testid="stCaption"] {color:var(--cal-ink-muted); font-size:12px; line-height:1.6;}
 
-        /* ---- 卡片与指标 ---- */
+        /* ---- 卡片与指标：顶部刻度条是 CALIBER 的母题 ---- */
         div[data-testid="stMetric"] {
-            background:#fff; border:1px solid #e6ecf3; border-radius:14px;
-            padding:14px 16px; box-shadow:0 3px 12px rgba(20,50,90,.06);
+            position:relative; overflow:visible; background:var(--cal-surface);
+            border:1px solid var(--cal-line); border-radius:8px; padding:16px 14px;
+            box-shadow:0 12px 28px -12px rgba(11,20,32,.10);
         }
-        /* 窄窗口下 5 列指标卡不再被省略号截断 */
-        [data-testid="stMetricValue"] {font-size:1.8rem; line-height:1.3;}
-        [data-testid="stMetricLabel"] {white-space:normal; line-height:1.35;}
-        .card {background:#fff; border:1px solid #e6ecf3; border-radius:14px;
-               padding:18px 20px; box-shadow:0 3px 12px rgba(20,50,90,.06); margin-bottom:16px;}
-        .card.warn {border-left:5px solid #d9534f; background:#fff6f5;}
-        .card.note {border-left:5px solid #e08b2c; background:#fffaf2;}
-        .hint {color:#5b6b80; font-size:14px; line-height:1.7;}
+        div[data-testid="stMetric"]::before {
+            content:""; position:absolute; top:0; left:0; right:0; height:3px;
+            border-radius:8px 8px 0 0;
+            background:linear-gradient(90deg, var(--cal-primary) 0%, rgba(24,165,139,.14) 100%);
+        }
+        /* 5 列并排时不能被省略号截断：缩小字号 + 允许溢出显示 */
+        [data-testid="stMetricValueContainer"] {min-width:0; overflow:visible;}
+        [data-testid="stMetricValue"] {
+            font-family:"IBM Plex Mono", ui-monospace, monospace !important;
+            font-variant-numeric:tabular-nums; font-weight:300 !important;
+            font-size:1.5rem !important; line-height:1.15; letter-spacing:-.02em;
+            white-space:nowrap !important; overflow:visible !important;
+            text-overflow:clip !important;
+            color:var(--cal-ink) !important;
+        }
+        [data-testid="stMetricLabel"] {
+            white-space:normal; line-height:1.4; font-size:12px; font-weight:500;
+            color:var(--cal-ink-muted);
+        }
+        [data-testid="stMetricDelta"] {font-size:12px; font-weight:500;}
+        .cal-badge {display:inline-block; border-radius:4px; padding:2px 7px;
+                    font-size:10px; font-weight:600; letter-spacing:.08em; line-height:1.4;
+                    background:var(--cal-surface-alt); color:var(--cal-ink-muted);}
+        .cal-sensitive {border-left:2px solid var(--cal-signal); padding-left:14px; margin:14px 0 20px 0;}
+        .cal-sensitive .cal-label {font:600 10px/1.4 "IBM Plex Mono", ui-monospace, monospace;
+                                   letter-spacing:.08em; color:var(--cal-signal); margin-bottom:8px;}
+        .card {position:relative; background:var(--cal-surface); border:1px solid var(--cal-line);
+               border-radius:8px; padding:18px 20px; margin-bottom:16px;
+               box-shadow:0 12px 28px -12px rgba(11,20,32,.10);
+               transition:transform .18s ease, box-shadow .18s ease;
+               overflow:hidden;}
+        .card::before {content:""; position:absolute; top:0; left:0; right:0; height:3px;
+                       background:linear-gradient(90deg, var(--cal-primary) 0%, transparent 100%);}
+        .card:hover {transform:translateY(-2px);
+                     box-shadow:0 18px 32px -16px rgba(11,20,32,.26);}
+        .card.warn {border-left:3px solid var(--cal-risk); background:#FFF7F6;}
+        .card.warn::before {background:linear-gradient(90deg, var(--cal-risk) 0%, transparent 100%);}
+        .card.note {border-left:3px solid var(--cal-watch); background:#FFFAF2;}
+        .card.note::before {background:linear-gradient(90deg, var(--cal-watch) 0%, transparent 100%);}
+        .hint {color:var(--cal-ink-muted); font-size:14px; line-height:1.6;}
 
-        /* ---- 表格：统一外框与 Markdown 表格样式 ---- */
+        /* ---- 表格：密集数据 + 宽松外框 ---- */
         [data-testid="stDataFrame"], [data-testid="stTable"] {
-            border:1px solid #e6ecf3; border-radius:12px; overflow:hidden; background:#fff;
+            border:1px solid var(--cal-line); border-radius:8px; overflow:hidden; background:var(--cal-surface);
         }
         [data-testid="stDataFrame"] table, [data-testid="stTable"] table, table.dataframe {
             border-collapse:collapse; width:100%; font-size:13px;
         }
         [data-testid="stDataFrame"] th, [data-testid="stTable"] th, table.dataframe th {
-            background:#f2f6fb; color:#12305c; font-weight:600; text-align:left;
-            padding:8px 12px; border:1px solid #e6ecf3; white-space:nowrap;
+            background:var(--cal-surface-alt); color:var(--cal-ink); font-weight:600; text-align:left;
+            padding:10px 12px; border-bottom:1px solid var(--cal-line); white-space:nowrap;
         }
         [data-testid="stDataFrame"] td, [data-testid="stTable"] td, table.dataframe td {
-            padding:7px 12px; border:1px solid #e6ecf3; vertical-align:middle;
-            white-space:normal; word-break:break-word;
+            padding:10px 12px; border-bottom:1px solid var(--cal-line); vertical-align:middle;
+            white-space:normal; word-break:break-word; line-height:1.5;
         }
         [data-testid="stDataFrame"] tbody tr:nth-child(even),
         [data-testid="stTable"] tbody tr:nth-child(even),
-        table.dataframe tbody tr:nth-child(even) {background:#fafcff;}
+        table.dataframe tbody tr:nth-child(even) {background:#FAFCFD;}
         [data-testid="stDataFrame"] tbody tr:hover,
-        [data-testid="stTable"] tbody tr:hover {background:#eef4fb;}
+        [data-testid="stTable"] tbody tr:hover {background:var(--cal-surface-alt);}
 
-        /* ---- 标签页 ---- */
-        .stTabs [data-baseweb="tab-list"] {gap:8px;}
-        .stTabs [data-baseweb="tab"] {background:#f2f6fb; border-radius:10px; padding:8px 16px;}
+        /* ---- 标签页与输入 ---- */
+        .stTabs [data-baseweb="tab-list"] {gap:6px;}
+        .stTabs [data-baseweb="tab"] {background:var(--cal-surface-alt); border-radius:6px; padding:8px 16px;
+                                       font-size:13px; font-weight:500;}
+        .stTabs [aria-selected="true"] {background:var(--cal-surface) !important;}
+        div[data-baseweb="input"] input, textarea {font-size:14px;}
+        div[data-baseweb="input"]:focus-within {
+            box-shadow:0 0 0 3px rgba(14,127,158,.14) !important;
+            border-radius:6px;
+        }
 
         /* ---- 侧边栏 ---- */
-        section[data-testid="stSidebar"] {background:#f7fafd;}
-        /* 首页入口：保留布局与点击行为，仅把显示文字改为带图标的「🏅 主页」 */
+        section[data-testid="stSidebar"] {background:var(--cal-surface-alt);}
+        section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3,
+        section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] {
+            font-weight:500; letter-spacing:0;
+        }
+        /* 首页入口：保留布局与点击行为，只把显示文字换成编号（去 emoji） */
         nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"] span[label="app"]
             > div[data-testid="stMarkdownContainer"] {display:none;}
         nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"] span[label="app"]::before {
-            content:"🏅 主页"; visibility:visible; white-space:nowrap; pointer-events:none;
+            content:"01  主页"; visibility:visible; white-space:nowrap; pointer-events:none;
+        }
+
+        /* ---- CALIBER v2 交互层：编号区块 / 骨架屏 / Toast / 焦点 / 减动效 ---- */
+        .cal-section {display:flex; align-items:baseline; gap:12px; margin:32px 0 16px;
+                      padding-bottom:10px; border-bottom:1px solid var(--cal-line);}
+        .cal-section .num {font:500 11px/1.2 "IBM Plex Mono", ui-monospace, monospace;
+                           letter-spacing:.04em; color:var(--cal-primary);}
+        .cal-section h2 {margin:0; padding:0; border:none; font-size:20px;
+                         font-weight:400; color:var(--cal-ink);}
+        .cal-skeleton-grid {display:grid; gap:16px; grid-template-columns:repeat(var(--cols,4),1fr);}
+        @media (max-width:1024px) { .cal-skeleton-grid {grid-template-columns:repeat(2,1fr);} }
+        @media (max-width:600px)  { .cal-skeleton-grid {grid-template-columns:1fr;} }
+        .cal-skeleton {position:relative; overflow:hidden; background:var(--cal-surface-alt);
+                       border-radius:8px; height:96px;}
+        .cal-skeleton::after {content:""; position:absolute; inset:0;
+            background:linear-gradient(90deg,transparent,rgba(16,35,54,.07),transparent);
+            animation:cal-shimmer 1.4s linear infinite;}
+        @keyframes cal-shimmer {0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+        .cal-toast {display:flex; align-items:center; gap:8px; background:var(--cal-surface);
+                    border:1px solid var(--cal-line); border-left:3px solid var(--cal-primary);
+                    border-radius:8px; padding:10px 14px; font-size:14px; color:var(--cal-ink);
+                    box-shadow:0 12px 28px -12px rgba(11,20,32,.2);
+                    animation:cal-toast-in .18s cubic-bezier(.2,.8,.2,1) both;}
+        .cal-toast.error {border-left-color:var(--cal-risk);}
+        .cal-toast.warn {border-left-color:var(--cal-watch);}
+        @keyframes cal-toast-in {from{opacity:0; transform:translateY(8px)} to{opacity:1;transform:none}}
+        /* ---- 全站统一：容器贴合背景 + 卡片装饰 + 侧栏图标 ---- */
+        .main .block-container, [data-testid="stVerticalBlock"] > div,
+        [data-testid="stHorizontalBlock"] > div {background:transparent !important;}
+        .stTabs [data-baseweb="tab-list"], .stTabs [data-baseweb="tab-panel"] {
+            background:transparent !important; border:none !important; padding:0 !important;}
+        .stTabs [data-baseweb="tab"] {background:transparent !important; border-radius:0 !important;
+            border-bottom:2px solid transparent; padding:10px 16px !important; font-size:13px !important;}
+        .stTabs [aria-selected="true"] {background:transparent !important;
+            border-bottom-color:var(--cal-primary) !important;}
+        [data-testid="stWidgetLabel"], [data-testid="stSelectbox"] label {
+            font-size:12px !important; font-weight:500 !important; color:var(--cal-ink) !important;}
+        div[data-baseweb="select"] > div, div[data-baseweb="input"] > div {
+            border:1px solid var(--cal-line) !important; border-radius:6px !important;
+            background:var(--cal-surface) !important;}
+
+        /* 所有信息/警告/展开块：统一卡片 + 顶部装饰线 + 悬浮反馈 */
+        [data-testid="stAlert"], [data-testid="stExpanderDetails"], [data-testid="stExpander"] {
+            position:relative; border:1px solid var(--cal-line) !important;
+            border-radius:8px !important; background:var(--cal-surface) !important;
+            box-shadow:none !important; transition:transform .18s ease, box-shadow .18s ease;}
+        [data-testid="stAlert"]::before, [data-testid="stExpanderDetails"]::before {
+            content:""; position:absolute; top:0; left:0; right:0; height:3px;
+            background:linear-gradient(90deg, var(--cal-primary) 0%, transparent 100%);}
+        [data-testid="stAlert"]:hover, [data-testid="stExpander"]:hover {
+            transform:translateY(-1px); box-shadow:0 12px 24px -14px rgba(11,20,32,.28) !important;}
+        [data-testid="stExpander"] summary, [data-testid="stExpanderHeader"] {
+            font-size:14px !important; font-weight:500 !important; color:var(--cal-ink) !important;}
+
+        /* 侧栏导航：统一几何图标 + 编号 + 中文名称，同时保留 */
+        nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"] {
+            border-radius:6px !important; min-height:38px; display:flex;
+            align-items:center; gap:10px; padding:8px 12px !important;
+            transition:background .12s ease-out, box-shadow .12s ease-out;}
+        nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"]:hover {
+            background:var(--cal-surface) !important; box-shadow:0 2px 8px rgba(11,20,32,.06);}
+        nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"][aria-current="page"] {
+            background:var(--cal-surface) !important;
+            box-shadow:inset 3px 0 0 var(--cal-primary), 0 2px 8px rgba(11,20,32,.08);}
+        /* Streamlit 1.x 的实际图标节点是 stIconEmoji：隐藏 emoji 字符，改用统一几何符号 */
+        nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"] [data-testid="stIconEmoji"] {
+            display:inline-flex !important; align-items:center; justify-content:center;
+            width:22px; height:22px; border-radius:5px; background:transparent !important;
+            font-size:0 !important; color:var(--cal-primary); line-height:1;}
+        nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"] [data-testid="stIconEmoji"]::after {
+            font-size:14px !important; color:var(--cal-primary);
+            font-family:Arial, "Segoe UI Symbol", sans-serif;}
+        nav[data-testid="stSidebarNav"] a[href="/"] [data-testid="stIconEmoji"]::after {content:"◈";}
+        nav[data-testid="stSidebarNav"] a[href*="运动员管理"] [data-testid="stIconEmoji"]::after {content:"◎";}
+        nav[data-testid="stSidebarNav"] a[href*="测试与评估"] [data-testid="stIconEmoji"]::after {content:"◉";}
+        nav[data-testid="stSidebarNav"] a[href*="数据分析"] [data-testid="stIconEmoji"]::after {content:"▤";}
+        nav[data-testid="stSidebarNav"] a[href*="评分标准"] [data-testid="stIconEmoji"]::after {content:"▦";}
+        nav[data-testid="stSidebarNav"] a[href*="分析报告"] [data-testid="stIconEmoji"]::after {content:"▧";}
+        nav[data-testid="stSidebarNav"] a[href*="隐私与账号"] [data-testid="stIconEmoji"]::after {content:"⚑";}
+        nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"] span[label] {
+            font-size:13px !important; font-weight:500 !important;
+            color:var(--cal-ink-muted) !important; line-height:1.4 !important;}
+        /* 名称：挂在 <a> 上，避开 stMarkdownEllipsis 的 overflow:hidden 裁切 */
+        nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"] span[label] {
+            display:none !important;}
+        nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"]::after {
+            font-family:"Inter", "Microsoft YaHei", sans-serif; font-size:13px;
+            font-weight:500; color:var(--cal-ink); letter-spacing:0; white-space:nowrap;}
+        nav[data-testid="stSidebarNav"] a:first-child::after {content:"总览主页";}
+        nav[data-testid="stSidebarNav"] a[href*="运动员管理"]::after {content:"运动员管理";}
+        nav[data-testid="stSidebarNav"] a[href*="测试与评估"]::after {content:"测试与评估";}
+        nav[data-testid="stSidebarNav"] a[href*="数据分析"]::after {content:"数据分析";}
+        nav[data-testid="stSidebarNav"] a[href*="评分标准"]::after {content:"评分标准";}
+        nav[data-testid="stSidebarNav"] a[href*="分析报告"]::after {content:"分析报告";}
+        nav[data-testid="stSidebarNav"] a[href*="隐私与账号"]::after {content:"隐私与账号";}
+        nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"] {border-radius:6px !important;}
+
+        /* 侧栏数据概览：统一卡片 + 数据强调 + 迷你条 */
+        .cal-stat-panel {border:1px solid var(--cal-line); border-radius:8px;
+                         background:var(--cal-surface); padding:14px 16px; margin:6px 0 14px 0;}
+        .cal-stat-head {display:flex; align-items:center; gap:8px; margin-bottom:12px;
+                        font-size:12px; font-weight:600; color:var(--cal-ink); letter-spacing:.02em;}
+        .cal-stat-head .ico {display:inline-block; width:18px; height:18px; border-radius:4px;
+                             background:var(--cal-primary); color:#fff; font-size:11px;
+                             text-align:center; line-height:18px;}
+        .cal-stat-grid {display:grid; grid-template-columns:1fr 1fr; gap:12px 10px;}
+        .cal-stat .v {font:300 22px/1.1 "IBM Plex Mono", ui-monospace, monospace;
+                      color:var(--cal-ink); font-variant-numeric:tabular-nums; letter-spacing:-.03em;}
+        .cal-stat .l {font-size:11px; color:var(--cal-ink-muted); margin-top:2px;}
+        .cal-stat.wide {grid-column:1 / -1;}
+        .cal-stat-bar {height:3px; background:var(--cal-surface-alt); border-radius:2px; margin-top:12px; overflow:hidden;}
+        .cal-stat-bar i {display:block; height:100%; background:var(--cal-primary); border-radius:2px;}
+
+        /* ---- 报告页：子板块标题 / 建议卡 / 图表去白边 ---- */
+        .cal-report-title {display:flex; align-items:center; gap:12px; margin:30px 0 14px;}
+        .cal-report-title .no {font:300 28px/1 "IBM Plex Mono", ui-monospace, monospace;
+                               letter-spacing:-.04em; color:var(--cal-primary); min-width:34px;}
+        .cal-report-title h2 {margin:0; padding:0; border:none; font-size:20px;
+                              font-weight:400; color:var(--cal-ink); white-space:nowrap;}
+        .cal-report-title .rule {flex:1; height:1px; background:var(--cal-line);}
+
+        .cal-advice {position:relative; border-radius:8px; padding:16px 20px 16px 22px;
+                     margin:14px 0; border:1px solid var(--cal-line);
+                     border-left:4px solid var(--adv-accent); background:var(--adv-bg);
+                     transition:transform .18s cubic-bezier(.2,.8,.2,1),
+                                box-shadow .18s ease, border-left-width .18s ease;}
+        .cal-advice:hover {transform:translateY(-3px); border-left-width:7px;
+                           box-shadow:0 18px 32px -18px rgba(11,20,32,.35);}
+        .cal-advice .head {display:flex; align-items:center; gap:10px; margin-bottom:8px;}
+        .cal-advice .title {font-size:14px; font-weight:500; color:var(--adv-ink);}
+        .cal-advice .body {font-size:13px; line-height:1.65; color:var(--cal-ink);}
+        .cal-advice .body b {font-weight:600; color:var(--adv-ink);}
+
+        /* Plotly 容器与报告文字区不要孤立白底，融入 --cal-canvas */
+        [data-testid="stPlotlyChart"] {background:transparent !important;
+                                       border:none !important; box-shadow:none !important;
+                                       padding:0 !important;}
+        [data-testid="stPlotlyChart"] > div,
+        [data-testid="stPlotlyChart"] .js-plotly-plot,
+        [data-testid="stPlotlyChart"] .plot-container,
+        [data-testid="stPlotlyChart"] .svg-container {background:transparent !important;}
+        /* Streamlit 的 info/warning/error 容器在报告页里也去掉白边底色 */
+        [data-testid="stAlert"] {border-radius:8px; border:1px solid var(--cal-line);
+                                 background:var(--cal-surface-alt) !important;}
+        .cal-report-block {background:transparent; border:none; box-shadow:none; padding:0;}
+
+        :focus-visible {outline:2px solid var(--cal-focus) !important;
+                        outline-offset:2px; box-shadow:0 0 0 3px rgba(14,127,158,.18) !important;}
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {animation-duration:.01ms !important;
+                animation-iteration-count:1 !important; transition-duration:.01ms !important;
+                scroll-behavior:auto !important;}
         }
     </style>
     """, unsafe_allow_html=True)
     require_access_gate()
 
 
+# CALIBER：页面编号取代 emoji 图标。icon 参数保留以兼容现有调用点。
+_CALIBER_INDEX = {
+    "测试与评估总览": "01 / OVERVIEW",
+    "运动员管理": "02 / ATHLETES",
+    "测试与评估": "03 / ASSESSMENT",
+    "数据分析": "04 / ANALYTICS",
+    "评分标准": "05 / STANDARDS",
+    "分析报告": "06 / REPORT",
+    "隐私与账号": "07 / PRIVACY",
+}
+
+
 def page_header(title: str, subtitle: str, icon: str = "") -> None:
+    index = _CALIBER_INDEX.get(title, "")
+    index_html = f'<span class="cal-index">{index}</span>' if index else ""
     st.markdown(
-        f'<div class="hero"><span class="tag">运动员体能与功能评估系统</span>'
-        f'<h1>{escape_html(icon)} {escape_html(title)}</h1><p>{escape_html(subtitle)}</p></div>',
+        f'<div class="hero">{index_html}<span class="tag">运动员体能与功能评估系统</span>'
+        f'<h1>{escape_html(title)}</h1><p>{escape_html(subtitle)}</p></div>',
         unsafe_allow_html=True,
     )
 
 
 def render_sidebar() -> None:
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**数据概览**")
-    st.sidebar.write(f"运动员：{len(load_athletes())} 人　｜　测试与评估记录：{len(load_tests())} 条")
-    configured = load_standards()
-    configured = int((configured["是否评分"] == "是").sum()) if not configured.empty else 0
-    st.sidebar.write(f"已配置评分标准：{configured} 组")
+    athletes = load_athletes()
+    tests = load_tests()
+    standards = load_standards()
+    configured = int((standards["是否评分"] == "是").sum()) if not standards.empty else 0
+    # 迷你条：用相对量做数据可视化，不给绝对阈值含义
+    bar_pct = min(100, round(configured / 2.4)) if configured else 0
+    st.sidebar.markdown(
+        f'<div class="cal-stat-panel">'
+        f'<div class="cal-stat-head"><span class="ico">▤</span>数据概览</div>'
+        f'<div class="cal-stat-grid">'
+        f'<div class="cal-stat"><div class="v">{len(athletes)}</div><div class="l">在册运动员</div></div>'
+        f'<div class="cal-stat"><div class="v">{len(tests)}</div><div class="l">测试与评估记录</div></div>'
+        f'<div class="cal-stat wide"><div class="v">{configured}</div>'
+        f'<div class="l">已配置评分标准（组）</div></div>'
+        f'</div><div class="cal-stat-bar"><i style="width:{bar_pct}%"></i></div></div>',
+        unsafe_allow_html=True,
+    )
     if db_mode_enabled():
         st.sidebar.caption("数据按账号独立保存在云端数据库，换设备登录后自动同步。")
     else:
@@ -1722,7 +2322,29 @@ def empty_state(message: str = "目前还没有数据。") -> None:
 
 
 def plotly_font(fig):
-    fig.update_layout(font=dict(family="Microsoft YaHei, SimHei, Arial", size=13),
-                      paper_bgcolor="white", plot_bgcolor="white",
-                      margin=dict(l=20, r=20, t=50, b=20))
+    # CALIBER：白底、细网格、阈值虚线由各页面自行叠加。
+    fig.update_layout(
+        font=dict(family="Inter, Microsoft YaHei, SimHei, Arial", size=12, color="#5B6F82"),
+        # 透明纸面，让图表融入 --cal-canvas，不再有孤立白框
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=20, r=20, t=50, b=20),
+        title_font=dict(size=15, color="#102336", weight=400),
+        hoverlabel=dict(bgcolor="#FFFFFF", font_size=12,
+                        font_family="Inter, Microsoft YaHei, SimHei, Arial"),
+    )
+    # 雷达图（polar）：只适度收缩绘图域给长标签留位置。
+    # 上一版同时加了 130/110 的大 margin 又收缩 domain，在右栏窄容器里被双重压缩，图变得很小。
+    if getattr(fig.layout, "polar", None) is not None:
+        fig.update_layout(margin=dict(l=30, r=30, t=36, b=30))
+        fig.update_polars(
+            domain=dict(x=[0.10, 0.90], y=[0.08, 0.92]),
+            angularaxis=dict(tickfont=dict(size=11, color="#5B6F82")),
+            radialaxis=dict(tickfont=dict(size=10, color="#5B6F82")),
+        )
+        return fig
+
+    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="#D8E2EC",
+                     showline=True, linewidth=1, linecolor="#B9C9D6", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="#D8E2EC",
+                     showline=True, linewidth=1, linecolor="#B9C9D6", zeroline=False)
     return fig

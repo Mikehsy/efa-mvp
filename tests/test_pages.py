@@ -1,4 +1,4 @@
-"""页面回归：六页零异常 + 分析报告页交互。"""
+"""页面回归：全部页面零异常 + 分析报告页交互 + 隐私页冒烟。"""
 import unittest
 
 from streamlit.testing.v1 import AppTest
@@ -18,6 +18,13 @@ class PageSmokeTests(unittest.TestCase):
                 at = AppTest.from_file(page_path(rel), default_timeout=90).run()
                 self.assertEqual(len(at.exception), 0,
                                  "; ".join(str(e) for e in at.exception))
+
+    def test_privacy_page_no_exception(self):
+        """PIPL 自助页在单机模式下安全提示并停止，不得抛异常。"""
+        at = AppTest.from_file(page_path("pages/6_🔒隐私与账号.py"),
+                               default_timeout=90).run()
+        self.assertEqual(len(at.exception), 0,
+                         "; ".join(str(e) for e in at.exception))
 
     def test_report_page_widgets(self):
         at = AppTest.from_file(page_path(PAGES[-1]), default_timeout=90).run()

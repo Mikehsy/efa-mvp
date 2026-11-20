@@ -10,8 +10,9 @@ import streamlit as st
 
 from utils import (
     FMS_PAIN_WARNING, FMS_RISK_LINE, STANDARDS_DISCLAIMER, athlete_map,
-    build_report, clear_all_data, csv_download, db_mode_enabled, empty_state,
-    ensure_files, fms_sessions, inject_css, load_athletes, load_tests,
+    build_report, cal_section, cal_skeleton_row, cal_toast, clear_all_data,
+    csv_download, db_mode_enabled, empty_state, ensure_files, fms_sessions,
+    inject_css, judge_score, judgment_badge, load_athletes, load_tests,
     page_header, physical_scores, plotly_font, render_sidebar, with_names,
 )
 
@@ -22,14 +23,22 @@ ensure_files()
 page_header("测试与评估总览", "一屏掌握运动员、体能得分、达标情况与 FMS 功能筛查风险", "🏠")
 render_sidebar()
 
+# Toast 在 rerun 之后仍要可见，所以先存 session_state 再重跑。
+if "cal_toast" in st.session_state:
+    _toast_msg, _toast_kind = st.session_state.pop("cal_toast")
+    cal_toast(_toast_msg, _toast_kind)
+
+_kpi_loading = st.empty()
+_kpi_loading.markdown(cal_skeleton_row(), unsafe_allow_html=True)
 athletes = load_athletes()
 tests = load_tests()
+_kpi_loading.empty()
 
 if athletes.empty:
     empty_state("系统里还没有运动员资料。")
 
 st.caption(f"评分标准：{STANDARDS_DISCLAIMER}。达标率与平均体能得分只统计 continuous 评分项；"
-           "FMS 的 0~3 原始分不参与 0~100 分体系。")
+           "FMS 的 0～3 原始分不参与 0～100 分体系。")
 
 # ------------------------------------------------------------------ 4 个 KPI
 physical = physical_scores(tests)
@@ -40,17 +49,27 @@ month_tests = int((tests["测试日期"] >= this_month).sum()) if not tests.empt
 pass_rate = f"{(scores >= 60).sum() / len(scores) * 100:.0f}%" if len(scores) else "—"
 needs = int((scores < 60).sum()) if len(scores) else 0
 
+avg_score = float(scores.mean()) if len(scores) else None
+pass_pct = (float((scores >= 60).sum()) / len(scores) * 100) if len(scores) else None
+
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("在册运动员", f"{len(athletes)} 人")
+c1.markdown(judgment_badge("RECORDED"), unsafe_allow_html=True)
 c2.metric("测试与评估记录", f"{len(tests)} 条", delta=f"本月 +{month_tests}")
-c3.metric("平均体能得分", f"{scores.mean():.1f} 分" if len(scores) else "—")
+c2.markdown(judgment_badge("RECORDED"), unsafe_allow_html=True)
+c3.metric("平均体能得分", f"{avg_score:.1f} /100" if avg_score is not None else "—")
+if avg_score is not None:
+    c3.markdown(judgment_badge(judge_score(avg_score)), unsafe_allow_html=True)
 c4.metric("达标率（仅体能项）", pass_rate,
           delta=f"待提升 {needs} 人次" if len(scores) else None)
+if pass_pct is not None:
+    c4.markdown(judgment_badge("PASS" if pass_pct >= 60 else "WATCH"),
+                unsafe_allow_html=True)
 
 st.markdown("")
 
 # ------------------------------------------------------------------ 体能区
-st.subheader("体能区")
+cal_section("02", "体能区")
 if physical.empty:
     st.info("暂无可评分的体能记录（可能缺少标准配置，或只有 FMS / 描述项）。"
             "到「测试与评估」录入，或在「评分标准」页配置阈值。")
@@ -63,9 +82,9 @@ else:
                  .sort_values("测试日期"))
         trend["测试日期"] = pd.to_datetime(trend["测试日期"]).dt.strftime("%Y-%m-%d")
         fig = px.line(trend, x="测试日期", y="得分", markers=True, range_y=[0, 100],
-                      labels={"得分": "平均得分"}, color_discrete_sequence=["#1e5b98"])
-        fig.add_hline(y=60, line_dash="dash", line_color="#e08b2c", annotation_text="达标线 60 分")
-        fig.add_hline(y=90, line_dash="dot", line_color="#18a58b", annotation_text="优秀线 90 分")
+                      labels={"得分": "平均得分"}, color_discrete_sequence=["#2E6BD6"])
+        fig.add_hline(y=60, line_dash="dash", line_color="#E08B2C", annotation_text="PASS 60")
+        fig.add_hline(y=90, line_dash="dot", line_color="#18A58B", annotation_text="EXCELLENT 90")
         fig.update_traces(line_width=3, marker_size=9)
         st.plotly_chart(plotly_font(fig), width="stretch")
 
@@ -73,22 +92,32 @@ else:
         st.markdown("**各项目平均得分**")
         by_item = physical.groupby("测试项目", as_index=False)["得分"].mean().sort_values("得分")
         fig2 = px.bar(by_item, x="得分", y="测试项目", orientation="h", range_x=[0, 100],
-                      color="得分", color_continuous_scale=["#e08b2c", "#1e5b98", "#18a58b"],
+                      color="得分", color_continuous_scale=["#E08B2C", "#2E6BD6", "#18A58B"],
                       labels={"得分": "平均得分"})
-        fig2.add_vline(x=60, line_dash="dash", line_color="#888")
+        fig2.add_vline(x=60, line_dash="dash", line_color="#E08B2C",
+                       annotation_text="PASS 60")
         st.plotly_chart(plotly_font(fig2), width="stretch")
 
 # ------------------------------------------------------------------ FMS 概览区
-st.subheader("FMS 概览区（0~21 分，风险线 14 分）")
+cal_section("03", "FMS 概览区（0～21 分，FMS RISK 14）")
 sessions = fms_sessions(tests)
 if sessions.empty:
     st.info("暂无 FMS 功能筛查记录。到「测试与评估 → FMS 录入矩阵」录入一次完整筛查。")
 else:
+    high_risk_n = int((sessions["风险"] == "较高风险").sum())
+    pain_n = int((sessions["含疼痛"] == "是").sum())
+    fms_avg = float(sessions["FMS总分"].mean())
+
     f1, f2, f3, f4 = st.columns(4)
     f1.metric("FMS 受测人次", f"{len(sessions)} 次")
-    f2.metric("平均 FMS 总分", f"{sessions['FMS总分'].mean():.1f} / 21")
-    f3.metric("较高风险人次", f"{int((sessions['风险'] == '较高风险').sum())} 次")
-    f4.metric("含疼痛人次", f"{int((sessions['含疼痛'] == '是').sum())} 次")
+    f1.markdown(judgment_badge("RECORDED"), unsafe_allow_html=True)
+    f2.metric("平均 FMS 总分", f"{fms_avg:.1f} / 21")
+    f2.markdown(judgment_badge("PASS" if fms_avg >= FMS_RISK_LINE else "FLAG"),
+                unsafe_allow_html=True)
+    f3.metric("较高风险人次", f"{high_risk_n} 次")
+    f3.markdown(judgment_badge("FLAG" if high_risk_n else "PASS"), unsafe_allow_html=True)
+    f4.metric("含疼痛人次", f"{pain_n} 次")
+    f4.markdown(judgment_badge("FLAG" if pain_n else "PASS"), unsafe_allow_html=True)
 
     pain_sessions = sessions[sessions["含疼痛"] == "是"]
     if not pain_sessions.empty:
@@ -108,9 +137,9 @@ else:
         chart = sessions.sort_values("测试日期").copy()
         chart["测试日期"] = pd.to_datetime(chart["测试日期"]).dt.strftime("%Y-%m-%d")
         fig3 = px.bar(chart, x="测试日期", y="FMS总分", color="姓名", barmode="group",
-                      range_y=[0, 21], labels={"FMS总分": "FMS 总分（0~21）"})
-        fig3.add_hline(y=FMS_RISK_LINE, line_dash="dash", line_color="#d9534f",
-                       annotation_text="风险线 14 分")
+                      range_y=[0, 21], labels={"FMS总分": "FMS 总分（0～21）"})
+        fig3.add_hline(y=FMS_RISK_LINE, line_dash="dash", line_color="#D9534F",
+                       annotation_text="FMS RISK 14")
         st.plotly_chart(plotly_font(fig3), width="stretch")
     with fr:
         st.markdown("**筛查明细（最近 10 次）**")
@@ -120,7 +149,7 @@ else:
                      width="stretch", hide_index=True)
 
 # ------------------------------------------------------------------ 最近记录
-st.subheader("最近 10 条测试与评估记录")
+cal_section("04", "最近 10 条测试与评估记录")
 if tests.empty:
     st.caption("暂无记录。")
 else:
@@ -133,7 +162,7 @@ else:
     csv_download(recent[show_cols], "最近测试与评估记录.csv", "下载最近记录 CSV")
 
 # ------------------------------------------------------------------ 个人成绩单
-st.subheader("个人成绩单（CSV 导出）")
+cal_section("05", "个人成绩单（CSV 导出）")
 names = athlete_map()
 if not names:
     st.caption("暂无运动员。")
@@ -153,9 +182,18 @@ else:
         fms_totals = pd.to_numeric(report["FMS总分"], errors="coerce").dropna()
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("记录条数", f"{len(report)} 条")
-        k2.metric("平均体能得分", f"{rs.mean():.1f} 分" if len(rs) else "—")
+        k1.markdown(judgment_badge("RECORDED"), unsafe_allow_html=True)
+        k2.metric("平均体能得分", f"{rs.mean():.1f} /100" if len(rs) else "—")
+        if len(rs):
+            k2.markdown(judgment_badge(judge_score(float(rs.mean()))), unsafe_allow_html=True)
         k3.metric("达标率", f"{(rs >= 60).sum() / len(rs) * 100:.0f}%" if len(rs) else "—")
+        if len(rs):
+            pct = (rs >= 60).sum() / len(rs) * 100
+            k3.markdown(judgment_badge("PASS" if pct >= 60 else "WATCH"), unsafe_allow_html=True)
         k4.metric("最近 FMS 总分", f"{int(fms_totals.iloc[-1])} / 21" if len(fms_totals) else "—")
+        if len(fms_totals):
+            k4.markdown(judgment_badge("PASS" if fms_totals.iloc[-1] >= FMS_RISK_LINE else "FLAG"),
+                        unsafe_allow_html=True)
         if (report["疼痛标记"] == "是").any():
             st.error(FMS_PAIN_WARNING)
         with st.expander("预览成绩单"):
@@ -177,12 +215,12 @@ with st.expander("数据管理（演示数据 / 清空 / 备份）"):
         if st.button("重新载入演示数据", width="stretch"):
             from utils import seed_demo_data
             seed_demo_data()
-            st.success("已载入演示数据")
+            st.session_state["cal_toast"] = ("已载入演示数据", "ok")
             st.rerun()
     with b2:
         st.caption("清空后不可恢复，请先导出数据留存（评分标准配置会保留）。")
         confirm = st.checkbox("我确认要清空全部数据")
         if st.button("清空全部数据", disabled=not confirm, width="stretch"):
             clear_all_data()
-            st.warning("数据已清空")
+            st.session_state["cal_toast"] = ("数据已清空", "warn")
             st.rerun()

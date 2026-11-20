@@ -19,7 +19,7 @@ ensure_files()
 page_header("测试与评估", "体能单项 / 批量录入、FMS 完整版筛查矩阵、历史导出与个人成绩单", "📏")
 render_sidebar()
 st.caption(f"评分标准：{STANDARDS_DISCLAIMER}。未配置组合不评分，得分显示「—」；"
-           "FMS 0~3 原始分不进入 0~100 分体系。")
+           "FMS 0～3 原始分不进入 0～100 分体系。")
 
 names = athlete_map()
 if not names:
@@ -85,12 +85,13 @@ with tab_single:
         if ref is None:
             st.markdown(f"""<div class="card note">
             <b>{item} · 该组合未配置</b>
-            <p class="hint">标准组 {group} 暂无达标线 / 优秀线或已关闭评分，成绩不评分、显示「—」。
+            <p class="hint">标准组 {group} 暂无低限线 / 达标线 / 优秀线或已关闭评分，成绩不评分、显示「—」。
             请到左侧「评分标准」页配置。</p></div>""", unsafe_allow_html=True)
         else:
             st.markdown(f"""<div class="card">
             <b>{item} · 参考标准（{group}）</b>
-            <p class="hint">达标线：{ref['pass']:g} {ref['unit']}（60 分）<br>
+            <p class="hint">低限线：{ref['low']:g} {ref['unit']}（0 分）<br>
+            达标线：{ref['pass']:g} {ref['unit']}（60 分）<br>
             优秀线：{ref['excellent']:g} {ref['unit']}（100 分）<br>
             方向：{ref['direction']}　｜　类别：{meta['类别']}</p></div>""", unsafe_allow_html=True)
         preview = calc_score(item, value, group, std) if meta["评分类型"] == "continuous" else None
@@ -116,19 +117,20 @@ with tab_batch:
 
     units = [cat_idx.loc[i, "单位"] for i in physical_items]
     kinds = [cat_idx.loc[i, "评分类型"] for i in physical_items]
-    passes, excellents = [], []
+    lows, passes, excellents = [], [], []
     for i in physical_items:
         r = lookup_standard(std, i, group_b)
+        lows.append(r["low"] if r else None)
         passes.append(r["pass"] if r else None)
         excellents.append(r["excellent"] if r else None)
     template = pd.DataFrame({
         "测试项目": physical_items, "单位": units, "评分类型": kinds,
-        "达标线": passes, "优秀线": excellents,
+        "低限线": lows, "达标线": passes, "优秀线": excellents,
         "成绩": [float("nan")] * len(physical_items),
     })
     edited = st.data_editor(
         template, hide_index=True, width="stretch",
-        disabled=["测试项目", "单位", "评分类型", "达标线", "优秀线"],
+        disabled=["测试项目", "单位", "评分类型", "低限线", "达标线", "优秀线"],
         column_config={"成绩": st.column_config.NumberColumn("成绩", format="%.2f")},
         key="batch_editor",
     )
@@ -143,8 +145,8 @@ with tab_batch:
 
 # ------------------------------------------------------------------ FMS 矩阵
 with tab_fms:
-    st.caption("FMS 完整版：7 个动作 0~3 分、5 个双侧动作分别记左右侧、3 项排除性测试；"
-               "双侧取较低侧计入，总分 0~21，<=14 分为较高风险。")
+    st.caption("FMS 完整版：7 个动作 0～3 分、5 个双侧动作分别记左右侧、3 项排除性测试；"
+               "双侧取较低侧计入，总分 0～21，<=14 分为较高风险。")
     f1, f2 = st.columns(2)
     with f1:
         aid_f = st.selectbox("运动员", options=list(names.keys()),
@@ -160,7 +162,7 @@ with tab_fms:
     st.markdown("**① 7 个动作评分矩阵**")
     header = st.columns([2.2, 1, 1, 0.8])
     header[0].caption("动作")
-    header[1].caption("左 / 单侧（0~3）")
+    header[1].caption("左 / 单侧（0～3）")
     header[2].caption("右（仅双侧）")
     header[3].caption("疼痛")
     scores, pain = {}, set()
@@ -287,9 +289,9 @@ with tab_history:
 
     with st.expander("评分口径说明"):
         st.markdown(
-            "- **continuous**：按「性别|年龄组」的达标线（60 分）/ 优秀线（100 分）线性换算 0~100 分，"
-            "四档等级：优秀 >=90、良好 >=75、达标 >=60、待提升 <60；未配置组合显示「—」。\n"
-            "- **ordinal（FMS）**：保留 0~3 原始分，双侧取较低侧，7 动作求和 0~21，<=14 为较高风险。\n"
+            "- **continuous**：按「性别|年龄组」三段式换算：低限线（0 分）→ 达标线（60 分）→ 优秀线（100 分），"
+            "超出区间按 0 / 100 封顶；四档等级：优秀 >=90、良好 >=75、达标 >=60、待提升 <60；未配置组合显示「—」。\n"
+            "- **ordinal（FMS）**：保留 0～3 原始分，双侧取较低侧，7 动作求和 0～21，<=14 为较高风险。\n"
             "- **binary**：排除性测试「通过 / 阳性」，阳性使对应动作记 0 分。\n"
             "- **descriptive**：身高 / 体重 / BMI 等仅记录不评分。\n"
             "- 得分、等级、FMS总分、不对称标记均为派生量，不落盘；改一处阈值后历史得分自动全部重算。")

@@ -36,7 +36,8 @@ class DataContractTests(unittest.TestCase):
         self.assertTrue(t[t["测试类别"] == "FMS"]["运动项目"].astype(str).str.strip().ne("").all())
 
     def test_standards_rows(self):
-        self.assertEqual(load_standards().shape, (270, 10))
+        # 用户确认取消大师组：27 项 × 2 性别 × 4 年龄组 = 216 行。
+        self.assertEqual(load_standards().shape, (216, 11))
 
     def test_legacy_192_rows_unchanged(self):
         """只读校验项目真实数据与 v1 备份：旧 192 条前 7 列逐格一致。"""
