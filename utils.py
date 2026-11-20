@@ -2171,9 +2171,11 @@ def inject_css() -> None:
         nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"] [data-testid="stIconEmoji"]::after {
             font-size:14px !important; color:var(--cal-primary);
             font-family:Arial, "Segoe UI Symbol", sans-serif;}
-        /* 首页链接在 Streamlit 中无 stIconEmoji 节点，改用 <a>::before 补图标 */
-        nav[data-testid="stSidebarNav"] a:first-child::before {
-            content:"◈"; display:inline-flex; align-items:center; justify-content:center;
+        /* 首页链接在 Streamlit 中无 stIconEmoji 节点，改用 <a>::before 补图标；
+           首页 href 以 / 结尾，其余页面以中文页名结尾，据此精确限定避免重复图标 */
+        nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"]::before {content:none !important;}
+        nav[data-testid="stSidebarNav"] a[data-testid="stSidebarNavLink"][href$="/"]::before {
+            content:"◈" !important; display:inline-flex; align-items:center; justify-content:center;
             width:22px; height:22px; border-radius:5px; font-size:14px;
             color:var(--cal-primary); font-family:Arial, "Segoe UI Symbol", sans-serif;}
         nav[data-testid="stSidebarNav"] a[href*="运动员管理"] [data-testid="stIconEmoji"]::after {content:"◎";}
